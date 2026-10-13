@@ -23,6 +23,7 @@ import app.platform.models  # noqa: E402,F401
 import app.profile.models  # noqa: E402,F401
 import app.progression.models  # noqa: E402,F401
 import app.rag.models  # noqa: E402,F401
+import app.relationships.models  # noqa: E402,F401
 from app.platform.config import load_config  # noqa: E402
 
 # this is the Alembic Config object, which provides

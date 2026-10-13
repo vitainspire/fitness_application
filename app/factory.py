@@ -75,9 +75,11 @@ def create_app() -> Flask:
     if cfg.service_role in ("all", "web"):
         from app.auth.routes import account_bp, bp as auth_bp
         from app.profile.routes import bp as core_bp
+        from app.relationships.routes import bp as relationships_bp
         app.register_blueprint(auth_bp)
         app.register_blueprint(account_bp)
         app.register_blueprint(core_bp)
+        app.register_blueprint(relationships_bp)
     if cfg.service_role in ("all", "chat"):
         from app.rag.routes import bp as rehab_bp
         from app.voice.routes import bp as voice_bp

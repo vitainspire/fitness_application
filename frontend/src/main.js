@@ -171,6 +171,7 @@ function go(name) {
   const loaders = {
     home: loadHome, chat: loadChat, videos: loadVideos,
     profile: loadProfile, notifications: loadNotifications,
+    relationships: loadRelationships,
   };
   const load = loaders[name];
   if (load) {
@@ -229,6 +230,7 @@ async function doAuth(mode) {
 
 async function route() {
   const p = await api("GET", "/v1/profile");
+  await claimPendingInviteIfAny();
   renderNotifBadge();
   if (!p.onboarded) { await loadOnboarding(); go("onboard"); return; }
   if (p.referred) { $("refer-msg").textContent = "We can't suggest exercises based on what you selected."; go("refer"); $("nav").className = NAV_ON; return; }
@@ -2169,6 +2171,10 @@ async function loadProfile() {
           <p class="text-[11px] font-semibold text-secondary">Security settings</p>
         </div>
       </div>
+      <button onclick="go('relationships')" class="flex items-center justify-between py-sm text-left border-t border-black/5">
+        <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">supervisor_account</span> Manage Plans for Others</span>
+        <span class="material-symbols-outlined text-secondary">chevron_right</span>
+      </button>
       <button onclick="openPasswordEditor()" class="flex items-center justify-between py-sm text-left border-t border-black/5">
         <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">lock_reset</span> Change Password</span>
         <span class="material-symbols-outlined text-secondary">chevron_right</span>
@@ -2215,6 +2221,290 @@ async function delAccount() {
   localStorage.clear(); AT=null; RT=null; go("auth");
 }
 
+// ── Managed plans (teacher/doctor/parent) ──
+// See MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md. No separate account type —
+// this is a feature every account already has, reached from Settings.
+const RELATION_LABELS = {child: "Child", student: "Student", patient: "Patient", other: "Other"};
+const RELATION_ICONS = {child: "family_restroom", student: "school", patient: "stethoscope", other: "person"};
+
+// Captured once at load: an invite link looks like ?invite=<token>. Kept in
+// sessionStorage so it survives the signup/login/onboarding screens between
+// when the link is opened and when the person is actually authenticated.
+let PENDING_INVITE_TOKEN = new URLSearchParams(location.search).get("invite")
+  || sessionStorage.getItem("pendingInvite") || null;
+if (PENDING_INVITE_TOKEN) sessionStorage.setItem("pendingInvite", PENDING_INVITE_TOKEN);
+
+async function claimPendingInviteIfAny() {
+  if (!PENDING_INVITE_TOKEN) return;
+  const token = PENDING_INVITE_TOKEN;
+  sessionStorage.removeItem("pendingInvite");
+  PENDING_INVITE_TOKEN = null;
+  try {
+    await api("POST", "/v1/relationships/claim", {invite_token: token});
+    toast("You're linked — they can now see and help manage your plan.");
+  } catch (e) {
+    toast(e.message || "That invite link didn't work.", true);
+  }
+}
+
+async function loadRelationships() {
+  const { relationships } = await api("GET", "/v1/relationships");
+  $("rel-list").innerHTML = relationships.length ? relationships.map(r => {
+    const openFn = r.status === "active" ? `openRelationshipDetail('${r.id}')`
+      : r.status === "pending" ? `openPendingBuild('${r.id}', '${r.invite_token}')` : null;
+    const clickable = openFn ? `cursor-pointer" onclick="${openFn}` : "";
+    return `
+    <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md flex items-center gap-sm">
+      <div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container shrink-0 ${clickable}">
+        <span class="material-symbols-outlined">${RELATION_ICONS[r.relation_type] || 'person'}</span>
+      </div>
+      <div class="flex-1 min-w-0 ${clickable}">
+        <h4 class="font-label-bold text-label-bold text-on-surface">${RELATION_LABELS[r.relation_type] || r.relation_type}</h4>
+        <p class="font-label-sm text-label-sm text-secondary">${r.status === 'pending' ? 'Not accepted yet — tap to set up their plan' : r.status === 'revoked' ? 'Revoked' : 'Active'}</p>
+      </div>
+      ${r.status === 'pending' ? `<button onclick="event.stopPropagation(); copyInviteLink('${r.invite_token}')" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold">Copy link</button>` : ''}
+      ${r.status !== 'revoked' ? `<button onclick="event.stopPropagation(); revokeRelationship('${r.id}')" aria-label="Revoke" class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>` : ''}
+    </div>`;
+  }).join("")
+    : `<p class="font-body-md text-on-surface-variant text-center py-lg">You're not managing anyone's plan yet. Tap "New" to invite a child, student, or patient.</p>`;
+}
+
+function copyInviteLink(token) {
+  const link = `${location.origin}${location.pathname}?invite=${token}`;
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(link).then(
+      () => toast("Link copied — send it to them to get started"),
+      () => window.prompt("Copy this link and send it to them:", link),
+    );
+  } else {
+    window.prompt("Copy this link and send it to them:", link);
+  }
+}
+
+function openCreateInviteModal() {
+  const m = $("invite-modal"); m.classList.remove("hidden"); m.classList.add("flex");
+}
+function closeCreateInviteModal() {
+  const m = $("invite-modal"); m.classList.add("hidden"); m.classList.remove("flex");
+}
+
+async function createRelationshipInvite(relationType) {
+  try {
+    const r = await api("POST", "/v1/relationships", {relation_type: relationType});
+    closeCreateInviteModal();
+    // Build the plan FIRST, get the link after — so the moment it's
+    // claimed, the person sees it already set up instead of an empty
+    // account waiting on a second trip back from the manager.
+    openPendingBuild(r.id, r.invite_token);
+  } catch (e) { toast(e.message, true); }
+}
+
+let CURRENT_INVITE_TOKEN = null;
+
+async function openPendingBuild(relationshipId, inviteToken) {
+  CURRENT_RELATIONSHIP = relationshipId;
+  CURRENT_IS_PENDING = true;
+  CURRENT_INVITE_TOKEN = inviteToken;
+  CURRENT_MANAGED_USER_ID = null;
+  await renderPendingBuild();
+  go("relationship-detail");
+}
+
+async function renderPendingBuild() {
+  const { entries } = await api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`);
+  $("rd-title").textContent = "Set Up Their Plan";
+  const entriesHtml = entries.length ? entries.map(e => `
+    <div class="flex items-center justify-between py-sm border-t border-black/5">
+      <div class="min-w-0">
+        <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
+        <p class="font-label-sm text-label-sm text-secondary">${e.target_sets} x ${e.target_amount} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
+      </div>
+      <button onclick="removePendingEntry('${e.activity_type}')" aria-label="Remove"
+        class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>
+    </div>`).join("")
+    : `<p class="font-body-md text-on-surface-variant py-sm">Add at least one activity, then share the link — they'll see this plan the moment they sign up.</p>`;
+
+  $("rd-body").innerHTML = `
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
+      <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Activities</h3>
+      ${entriesHtml}
+    </section>
+    <button onclick="copyInviteLink('${CURRENT_INVITE_TOKEN}')"
+      class="bg-primary text-on-primary rounded-full py-md font-label-bold text-label-bold flex items-center justify-center gap-xs">
+      <span class="material-symbols-outlined text-[18px]">link</span> Get the Link to Share
+    </button>`;
+}
+
+async function removePendingEntry(activityType) {
+  try {
+    await api("DELETE", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries/${activityType}`);
+    await renderPendingBuild();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function revokeRelationship(id) {
+  if (!confirm("Stop managing this plan? They keep their current activities and targets exactly as they are — you just won't be able to see or edit them anymore.")) return;
+  try {
+    await api("DELETE", `/v1/relationships/${id}`);
+    await loadRelationships();
+  } catch (e) { toast(e.message, true); }
+}
+
+let CURRENT_RELATIONSHIP = null;
+let CURRENT_MANAGED_USER_ID = null;
+let CURRENT_IS_PENDING = false;
+
+async function openRelationshipDetail(id) {
+  try {
+    const d = await api("GET", `/v1/relationships/${id}/activity`);
+    CURRENT_RELATIONSHIP = id;
+    CURRENT_MANAGED_USER_ID = d.managed_user_id;
+    CURRENT_IS_PENDING = false;
+    renderRelationshipDetail(d);
+    go("relationship-detail");
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderRelationshipDetail(d) {
+  $("rd-title").textContent = `Their Plan (${RELATION_LABELS[d.relation_type] || d.relation_type})`;
+  const streak = d.streak.current || 0;
+  const entries = d.managed_entries || [];
+  const overrides = d.safety_overrides || [];
+
+  const entriesHtml = entries.length ? entries.map(e => `
+    <div class="flex items-center justify-between py-sm border-t border-black/5">
+      <div class="min-w-0">
+        <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
+        <p class="font-label-sm text-label-sm text-secondary">${e.target_sets} x ${e.target_amount} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
+      </div>
+      <button onclick="editManagedTarget('${e.activity_type}', ${e.target_sets}, ${e.target_amount})"
+        class="shrink-0 bg-black/5 hover:bg-black/10 px-md py-xs rounded-full font-label-bold text-label-bold text-on-background">Edit</button>
+    </div>`).join("")
+    : `<p class="font-body-md text-on-surface-variant py-sm">You haven't added anything to their plan yet.</p>`;
+
+  $("rd-body").innerHTML = `
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-sm">
+      <div class="flex items-center justify-between">
+        <p class="font-body-md text-on-surface-variant">Current streak</p>
+        <p class="font-headline-sm text-headline-sm text-on-background">${streak} day${streak === 1 ? "" : "s"}</p>
+      </div>
+    </section>
+
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
+      <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Activities you manage</h3>
+      ${entriesHtml}
+    </section>
+
+    ${overrides.length ? `
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
+      <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Safety overrides on file</h3>
+      ${overrides.map(o => `
+        <div class="py-sm border-t border-black/5">
+          <p class="font-body-md text-on-background">${escapeHtml(o.activity_type)} — ${escapeHtml(o.grid_verdict)}</p>
+          <p class="font-label-sm text-label-sm text-secondary">${escapeHtml(o.warning_text)}</p>
+        </div>`).join("")}
+    </section>` : ""}
+
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
+      <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Recent activity (30 days)</h3>
+      ${d.recent_activity.length ? d.recent_activity.slice(0, 15).map(a => `
+        <div class="flex items-center justify-between py-xs border-t border-black/5">
+          <span class="font-body-md text-on-background">${escapeHtml(a.name)}</span>
+          <span class="font-label-sm text-label-sm text-secondary">${a.sets} x ${a.amount} ${escapeHtml(a.unit)} · ${a.date}</span>
+        </div>`).join("")
+        : `<p class="font-body-md text-on-surface-variant py-sm">Nothing logged yet.</p>`}
+    </section>`;
+}
+
+async function editManagedTarget(activityType, currentSets, currentAmount) {
+  const sets = window.prompt(`Sets for ${activityType}:`, currentSets);
+  if (sets === null) return;
+  const amount = window.prompt(`Amount per set for ${activityType}:`, currentAmount);
+  if (amount === null) return;
+  try {
+    await api("PUT", `/v1/program/entries/${activityType}/target`, {
+      managed_user_id: CURRENT_MANAGED_USER_ID,
+      target_sets: parseInt(sets, 10), target_amount: parseFloat(amount),
+    });
+    toast("Updated");
+    await openRelationshipDetail(CURRENT_RELATIONSHIP);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function openManagedAddModal() {
+  if (!CURRENT_RELATIONSHIP) return;
+  try {
+    const { activities } = await api("GET", "/v1/taxonomy/activities");
+    $("ma-activity").innerHTML = activities.map(a =>
+      `<option value="${a.activity_type}">${escapeHtml(a.display_name)}</option>`).join("");
+    // Custom exercises need a real, already-existing account to attach to —
+    // not available yet while the invite is still pending (no managed_user_id).
+    $("ma-custom-section").classList.toggle("hidden", CURRENT_IS_PENDING);
+    const m = $("managed-add-modal"); m.classList.remove("hidden"); m.classList.add("flex");
+  } catch (e) { toast(e.message, true); }
+}
+function closeManagedAddModal() {
+  const m = $("managed-add-modal"); m.classList.add("hidden"); m.classList.remove("flex");
+}
+
+async function submitManagedAdd(overrideConfirmed) {
+  const activityType = $("ma-activity").value;
+  const sets = parseInt($("ma-sets").value, 10) || 1;
+  const amount = parseFloat($("ma-amount").value);
+  if (!amount || amount <= 0) { toast("Enter an amount greater than zero.", true); return; }
+  try {
+    if (CURRENT_IS_PENDING) {
+      // Staged against the invite itself — materializes automatically the
+      // moment it's claimed (app/relationships/service.py's claim_invite).
+      await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`, {
+        activity_type: activityType, target_sets: sets, target_amount: amount,
+        auto_progress: $("ma-auto").checked,
+      });
+      closeManagedAddModal();
+      toast("Added to their plan");
+      await renderPendingBuild();
+      return;
+    }
+    // add_program_entry always seeds the taxonomy's own default sets/amount
+    // for a brand-new entry — it has no notion of "start it at this specific
+    // number" itself. The follow-up PUT right below is what actually makes
+    // this form's sets/amount values stick.
+    const d = await api("POST", "/v1/program/entries", {
+      activity_type: activityType, managed_user_id: CURRENT_MANAGED_USER_ID,
+      auto_progress: $("ma-auto").checked, override_confirmed: !!overrideConfirmed,
+    });
+    if (d.needs_confirmation) {
+      const ok = confirm(
+        d.warning_text + "\n\nClick OK only if this has been clinically advised. " +
+        "Click Cancel to keep it blocked."
+      );
+      if (ok) await submitManagedAdd(true);
+      return;
+    }
+    await api("PUT", `/v1/program/entries/${activityType}/target`, {
+      managed_user_id: CURRENT_MANAGED_USER_ID, target_sets: sets, target_amount: amount,
+    });
+    closeManagedAddModal();
+    toast("Added to their plan");
+    await openRelationshipDetail(CURRENT_RELATIONSHIP);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function submitManagedCustomAdd() {
+  const name = $("ma-custom-name").value.trim();
+  if (!name) { toast("Type a name first", true); return; }
+  try {
+    await api("POST", "/v1/custom-exercises", {
+      name, measurement_types: [$("ma-custom-type").value],
+      managed_user_id: CURRENT_MANAGED_USER_ID,
+    });
+    $("ma-custom-name").value = "";
+    closeManagedAddModal();
+    toast("Custom exercise added for them");
+    await openRelationshipDetail(CURRENT_RELATIONSHIP);
+  } catch (e) { toast(e.message, true); }
+}
+
 // Every function referenced from an inline onclick="..." in index.html must be
 // reachable on window — a Vite module's top-level functions are scoped to the
 // module, not attached to the global object the way a plain <script> tag's
@@ -2230,9 +2520,26 @@ Object.assign(window, {
   openDemo, closeDemo, sendChat, doLogout, delAccount, go,
   startWorkout, playerGo, playerMarkDone, playerAddRestTime, playerSkipRest, closePlayer,
   playerToggleSet, playerTogglePause,
+  openCreateInviteModal, closeCreateInviteModal, createRelationshipInvite, copyInviteLink,
+  revokeRelationship, openRelationshipDetail, editManagedTarget,
+  openManagedAddModal, closeManagedAddModal, submitManagedAdd, submitManagedCustomAdd,
+  openPendingBuild, removePendingEntry,
 });
 
 (async () => {
+  // Found live: opening an invite link on the SAME browser where the
+  // manager is already logged in silently continued as the manager's own
+  // account (AT was already set, so this skipped straight past the login
+  // screen) — the exact "it's using my account instead of asking the
+  // student/patient/child to sign in as themselves" bug. An invite link
+  // must always show the login/signup screen, regardless of who (if anyone)
+  // is already authenticated on this device, so the actual recipient signs
+  // up or logs in as THEIR OWN account before the link gets claimed.
+  if (PENDING_INVITE_TOKEN) {
+    toast("Sign up or log in as the person this plan is for.");
+    go("auth");
+    return;
+  }
   if (!AT) { go("auth"); return; }
   try {
     await route();
