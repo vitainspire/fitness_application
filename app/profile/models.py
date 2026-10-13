@@ -268,6 +268,20 @@ class UserProgram(Base):
     # what makes that week the "test week" without needing a special formula.
     pro_leveled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- Managed plans (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md) -------
+    # Null for every entry today and for anything a user adds to their own
+    # plan themselves — set only when a manager (teacher/doctor/parent)
+    # created or is responsible for this specific entry. This is both what a
+    # manager's roster view filters on and what authorizes them to edit it.
+    managed_by_relationship_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("managed_relationships.id", ondelete="SET NULL"))
+    # Independent of `source` on purpose — `source='user_override'` already
+    # means something different and unrelated (a safety-grid avoid-verdict
+    # override, see add_program_entry). This is the new, clean "does the
+    # weekly engine touch this" flag; defaults true so every existing row and
+    # every self-built entry keeps today's behavior unchanged.
+    auto_progress: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
     __table_args__ = (
         CheckConstraint("status IN ('active','suspended')", name="prog_status_known"),
         CheckConstraint("source IN ('template','agent','manual','user_override')",

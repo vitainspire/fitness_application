@@ -438,6 +438,135 @@
   </div>
 </section>
 
+<!-- ════════ MANAGED PLANS (teacher/doctor/parent) ════════
+     Visible to every account — see MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md.
+     Not a separate account type: anyone can open this and create a plan for
+     a child, student, patient, or other relation. -->
+<section id="s-relationships" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
+    <div class="flex items-center gap-sm mb-lg">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <div class="flex-1">
+        <h2 class="font-headline-md text-headline-md text-on-background">Manage Plans</h2>
+        <p class="text-[11px] font-semibold text-secondary -mt-0.5">For a child, student, or patient</p>
+      </div>
+      <button onclick="openCreateInviteModal()" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold flex items-center gap-1">
+        <span class="material-symbols-outlined text-[18px]">add</span> New
+      </button>
+    </div>
+    <div id="rel-list" class="flex flex-col gap-sm"></div>
+  </div>
+</section>
+
+<!-- ════════ MANAGED PLAN DETAIL (monitoring + plan-builder) ════════ -->
+<section id="s-relationship-detail" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
+    <div class="flex items-center gap-sm mb-lg">
+      <button onclick="go('relationships')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <div class="flex-1">
+        <h2 id="rd-title" class="font-headline-md text-headline-md text-on-background">Their Plan</h2>
+        <p class="text-[11px] font-semibold text-secondary -mt-0.5">What they're actually doing</p>
+      </div>
+      <button onclick="openManagedAddModal()" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold flex items-center gap-1">
+        <span class="material-symbols-outlined text-[18px]">add</span> Activity
+      </button>
+    </div>
+    <div id="rd-body" class="flex flex-col gap-card-gap"></div>
+  </div>
+</section>
+
+<!-- Create-invite modal: pick who this plan is for, get the link back. -->
+<div id="invite-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeCreateInviteModal()">
+  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md p-lg flex flex-col gap-md">
+    <div class="flex items-center justify-between">
+      <h3 class="font-headline-sm text-headline-sm text-on-surface">Who is this plan for?</h3>
+      <button onclick="closeCreateInviteModal()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="grid grid-cols-2 gap-sm">
+      <button onclick="createRelationshipInvite('child')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
+        <span class="material-symbols-outlined">family_restroom</span> My Child
+      </button>
+      <button onclick="createRelationshipInvite('student')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
+        <span class="material-symbols-outlined">school</span> My Student
+      </button>
+      <button onclick="createRelationshipInvite('patient')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
+        <span class="material-symbols-outlined">stethoscope</span> My Patient
+      </button>
+      <button onclick="createRelationshipInvite('other')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
+        <span class="material-symbols-outlined">person</span> Other
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Add-activity modal, manager side: plain taxonomy list (no personalized
+     tier/catalogue for a managed user yet) + sets/amount + the auto-progress
+     toggle this whole feature is built around. -->
+<div id="managed-add-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeManagedAddModal()">
+  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
+    <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
+      <h3 class="font-headline-sm text-headline-sm text-on-surface">Add to their plan</h3>
+      <button onclick="closeManagedAddModal()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="p-md flex flex-col gap-md">
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface">Activity</label>
+        <select id="ma-activity" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md"></select>
+      </div>
+      <div class="grid grid-cols-2 gap-sm">
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
+          <input id="ma-sets" type="number" min="1" value="1" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Amount</label>
+          <input id="ma-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+      </div>
+      <label class="flex items-center justify-between py-xs">
+        <span class="font-body-md text-on-surface">Let the app adjust this automatically</span>
+        <input id="ma-auto" type="checkbox" checked class="w-5 h-5">
+      </label>
+      <button onclick="submitManagedAdd()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Add</button>
+
+      <!-- Custom exercise: tracking-only, same as it already works for
+           yourself — no auto-update toggle, since custom exercises have no
+           such concept for anyone, today. Hidden while an invite is still
+           pending — it needs a real, already-existing account to attach to. -->
+      <div id="ma-custom-section" class="flex flex-col gap-md">
+        <div class="border-t border-outline-variant/30 pt-md mt-xs">
+          <h4 class="font-headline-sm text-headline-sm text-on-surface">Or add a custom exercise for them</h4>
+          <p class="font-body-md text-body-md text-on-surface-variant mt-1">Tracked in their history only — never auto-updated.</p>
+        </div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Name</label>
+          <input id="ma-custom-name" type="text" placeholder="e.g. Trampoline"
+            class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
+        </div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">How do they count it?</label>
+          <select id="ma-custom-type" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
+            <option value="reps">Reps</option>
+            <option value="distance">Distance</option>
+            <option value="duration">Time</option>
+          </select>
+        </div>
+        <button onclick="submitManagedCustomAdd()" class="bg-black/5 hover:bg-black/10 text-on-background rounded-full py-sm font-label-bold text-label-bold">Add Custom Exercise</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ════════ NOTIFICATIONS ════════ -->
 <section id="s-notifications" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg">

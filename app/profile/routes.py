@@ -207,7 +207,19 @@ def program_catalogue():
 @require_auth
 def add_program_entry():
     d = _body()
+    # managed_user_id present = a manager (teacher/doctor/parent) acting on
+    # someone else's plan — see MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md.
+    # Authorization (an active relationship must exist) is checked inside
+    # the service call itself, never trusted from the client.
+    managed_user_id = d.get("managed_user_id")
     with session_scope() as s:
+        if isinstance(managed_user_id, str) and managed_user_id:
+            return jsonify(service.add_program_entry(
+                s, managed_user_id, _str_field(d, "activity_type"),
+                override_confirmed=bool(d.get("override_confirmed")),
+                acting_manager_id=g.user_id,
+                auto_progress=bool(d.get("auto_progress", True)),
+            ))
         return jsonify(service.add_program_entry(
             s, g.user_id, _str_field(d, "activity_type"),
             override_confirmed=bool(d.get("override_confirmed")),
@@ -219,6 +231,24 @@ def add_program_entry():
 def remove_program_entry(activity_type: str):
     with session_scope() as s:
         return jsonify(service.remove_program_entry(s, g.user_id, activity_type))
+
+
+@bp.put("/program/entries/<activity_type>/target")
+@require_auth
+def set_managed_target(activity_type: str):
+    """Manager-only: directly set a managed entry's target, overriding
+    whatever the app would otherwise propose. See
+    MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §4."""
+    d = _body()
+    managed_user_id = d.get("managed_user_id")
+    if not isinstance(managed_user_id, str) or not managed_user_id:
+        raise ValidationError("managed_user_id is required.")
+    with session_scope() as s:
+        return jsonify(service.set_managed_target(
+            s, g.user_id, managed_user_id, activity_type,
+            target_sets=_int_field(d, "target_sets", 1),
+            target_amount=_float_field(d, "target_amount"),
+        ))
 
 
 @bp.get("/suggestions")
@@ -308,12 +338,21 @@ def custom_exercises():
 @require_auth
 def create_custom_exercise():
     d = _body()
+    managed_user_id = d.get("managed_user_id")
     with session_scope() as s:
-        result = service.create_custom_exercise(
-            s, g.user_id,
-            name=_str_field(d, "name"),
-            measurement_types=_list_field(d, "measurement_types"),
-        )
+        if isinstance(managed_user_id, str) and managed_user_id:
+            result = service.create_custom_exercise(
+                s, managed_user_id,
+                name=_str_field(d, "name"),
+                measurement_types=_list_field(d, "measurement_types"),
+                acting_manager_id=g.user_id,
+            )
+        else:
+            result = service.create_custom_exercise(
+                s, g.user_id,
+                name=_str_field(d, "name"),
+                measurement_types=_list_field(d, "measurement_types"),
+            )
         return jsonify(result), 201
 
 

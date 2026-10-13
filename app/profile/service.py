@@ -24,6 +24,8 @@ from app.profile.models import (
     ActivityLog, CustomExercise, OverrideConsent, PersonalBest, UserCondition, UserProfile,
     UserProgram, WorkoutSession,
 )
+from app.relationships.models import ManagedRelationship
+from app.relationships.service import require_active_relationship
 
 IST = timezone(timedelta(hours=5, minutes=30))  # single market (3.3)
 
@@ -612,19 +614,48 @@ def list_catalogue(session: Session, user_id: str) -> list[dict]:
 
 
 def add_program_entry(session: Session, user_id: str, activity_type: str,
-                      override_confirmed: bool = False) -> dict:
+                      override_confirmed: bool = False, *,
+                      acting_manager_id: str | None = None,
+                      auto_progress: bool = True) -> dict:
     """14.7 — user-driven add, curated taxonomy only, never free text.
 
     An `avoid`-verdict activity is permitted, but only past a blocking
     confirmation naming the condition and verdict — a doctor who examined the
     user outranks the generic table, but the app does not adopt the choice as
     its own advice, and never progresses what it does not consider safe.
+
+    Managed plans (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md): `user_id` is
+    always the program's OWNER (the managed person), never the caller when a
+    manager is acting on someone else's behalf — that caller is
+    `acting_manager_id`, required to hold an active relationship with
+    `user_id`, checked here so nothing downstream has to re-derive
+    authorization. `auto_progress` is only meaningful for a manager-created
+    entry; an ordinary self-add always keeps the column's default (True).
     """
     if is_referred(session, user_id):
         raise Forbidden("Speak to a doctor before adding exercises to your program.")
     t = session.get(ActivityTaxonomy, activity_type)
     if t is None:
         raise NotFound(f"Unknown activity: {activity_type}")
+
+    relationship = None
+    if acting_manager_id is not None:
+        relationship = require_active_relationship(session, acting_manager_id, user_id)
+        # Two managers on the same activity: blocked for v1, never a silent
+        # takeover — see the plan doc §3.3. A normal self-added entry (no
+        # managed_by_relationship_id) is always fine to convert into a
+        # managed one; only a DIFFERENT, still-active manager is blocked.
+        existing_for_block_check = session.get(UserProgram, (user_id, activity_type))
+        if (existing_for_block_check is not None
+                and existing_for_block_check.managed_by_relationship_id is not None
+                and existing_for_block_check.managed_by_relationship_id != relationship.id):
+            other = session.get(
+                ManagedRelationship, existing_for_block_check.managed_by_relationship_id)
+            if other is not None and other.status == "active":
+                raise Conflict(
+                    f"{t.display_name} is already managed by another "
+                    f"{other.relation_type} relationship for this user."
+                )
 
     worst = _worst_verdict(session, user_id, activity_type)
     if worst and worst["verdict"] == "avoid":
@@ -674,14 +705,65 @@ def add_program_entry(session: Session, user_id: str, activity_type: str,
         # deleting+recreating a custom exercise gets a fresh id): any log from
         # before this moment must not count toward today's completion below.
         existing.added_at = datetime.now(timezone.utc)
+        if relationship is not None:
+            existing.managed_by_relationship_id = relationship.id
+            existing.auto_progress = auto_progress
     else:
         session.add(UserProgram(
             user_id=user_id, activity_type=activity_type,
             target_sets=t.default_sets, target_amount=t.default_amount,
             unit=t.amount_unit, source=source,
+            managed_by_relationship_id=relationship.id if relationship else None,
+            auto_progress=auto_progress if relationship else True,
         ))
     session.flush()
     return {"added": True, "needs_confirmation": False, "program": get_program(session, user_id)}
+
+
+def set_managed_target(session: Session, manager_user_id: str, managed_user_id: str,
+                       activity_type: str, target_sets: int, target_amount: float) -> dict:
+    """The first-ever direct "set this exact number" write in the app — see
+    MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §4. Every other target change
+    in this codebase only ever happens through the automated weekly job or a
+    confirmed chat escalation; this exists specifically so a manager can
+    override whatever the app proposes (or set a fixed one from scratch),
+    which neither of those paths allows for anyone.
+
+    Only usable on an entry THIS manager's own active relationship is
+    responsible for — not just any entry belonging to a managed user, in
+    case a future multi-manager scenario ever has more than one manager on
+    the same account (see the plan doc §3.3's "blocked, not merged" note).
+    """
+    relationship = require_active_relationship(session, manager_user_id, managed_user_id)
+    entry = session.get(UserProgram, (managed_user_id, activity_type))
+    if entry is None or entry.managed_by_relationship_id != relationship.id:
+        raise NotFound(f"No entry for {activity_type} managed by this relationship.")
+
+    t = session.get(ActivityTaxonomy, activity_type)
+    if round(target_amount, 2) <= 0:
+        raise ValidationError("Amount must be greater than zero.")
+    if target_sets < 1:
+        raise ValidationError("Sets must be at least 1.")
+    if t.prescription_type in ("distance", "duration") and target_sets != 1:
+        raise ValidationError(f"{t.display_name} is a single effort, not sets.")
+
+    if t.prescription_type == "reps":
+        # Same half-up whole-number rule as every other reps write in this
+        # codebase (app/progression/service.py's _round_reps) — a manager
+        # typing "12.5" must not silently save a target nobody can perform.
+        from app.progression.service import _round_reps  # local: avoids a
+        # module-level import cycle (progression/service.py already imports
+        # from this module).
+        target_amount = _round_reps(target_amount)
+
+    entry.target_sets = target_sets
+    entry.target_amount = Decimal(str(target_amount))
+    entry.internal_target_amount = Decimal(str(target_amount))
+    session.flush()
+    return {
+        "activity_type": activity_type, "target_sets": entry.target_sets,
+        "target_amount": float(entry.target_amount), "auto_progress": entry.auto_progress,
+    }
 
 
 def remove_program_entry(session: Session, user_id: str, activity_type: str) -> dict:
@@ -1228,7 +1310,17 @@ def _reject_if_matches_taxonomy(session: Session, normalized: str, label: str) -
 
 
 def create_custom_exercise(session: Session, user_id: str, *, name: str,
-                           measurement_types: list[str]) -> dict:
+                           measurement_types: list[str],
+                           acting_manager_id: str | None = None) -> dict:
+    """Managed plans: a manager can create a custom (tracking-only) exercise
+    for their managed person too — see
+    MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md. Custom exercises have no
+    auto_progress concept at all, for anyone, today (4.4 — tracking-only,
+    never auto-progressed), so unlike add_program_entry there's nothing to
+    toggle here; this purely extends WHO can create one, not what it does.
+    """
+    if acting_manager_id is not None:
+        require_active_relationship(session, acting_manager_id, user_id)
     name = (name or "").strip()
     if not name:
         raise ValidationError("Name is required.")

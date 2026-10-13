@@ -857,6 +857,15 @@ def run_weekly_progression(session: Session, user_id: str, *,
             UserProgram.user_id == user_id,
             UserProgram.status == "active",       # 15.4 — never progress a suspended entry
             UserProgram.source != "user_override",  # 15.2 — never progressed
+            # MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §3.3 — a manager's
+            # "keep this fixed" choice, independent of (and additional to)
+            # the user_override exclusion above: an avoid-verdict override
+            # stays excluded even if a manager later requests auto_progress
+            # on it (tightest guard wins — the safety reasoning behind never
+            # auto-progressing an override does not go away just because a
+            # manager wants growth). Defaults True, so this changes nothing
+            # for any entry that existed before this feature.
+            UserProgram.auto_progress.is_(True),
         ).with_for_update()
     ).all()
 
@@ -1079,7 +1088,11 @@ def apply_escalation(session: Session, user_id: str, activity_type: str,
         .where(UserProgram.user_id == user_id, UserProgram.activity_type == activity_type)
         .with_for_update()
     )
-    if entry is None or entry.status != "active" or entry.source == "user_override":
+    if (entry is None or entry.status != "active" or entry.source == "user_override"
+            or not entry.auto_progress):
+        # auto_progress=False: MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md
+        # §3.3 — same "tightest guard wins" reasoning as
+        # run_weekly_progression's own exclusion just above this function.
         raise NotFound(f"No active, escalatable program entry for {activity_type}")
     taxonomy = session.get(ActivityTaxonomy, activity_type)
     if taxonomy is None:
