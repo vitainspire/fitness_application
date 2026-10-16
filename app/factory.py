@@ -11,6 +11,7 @@ from flask_cors import CORS
 from app.platform import redis_clients as rc
 from app.platform.config import load_config
 from app.platform.db import init_engine
+from app.platform.converters import UuidStrConverter
 from app.platform.errors import register_error_handlers
 
 
@@ -18,6 +19,8 @@ def create_app() -> Flask:
     cfg = load_config()
 
     app = Flask(__name__)
+    # Must be registered before any blueprint adds its rules (see converters.py).
+    app.url_map.converters["uid"] = UuidStrConverter
     app.config["APP_CONFIG"] = cfg
     app.config["SECRET_KEY"] = cfg.secret_key
     # Found live (pre-launch production readiness check): nothing capped

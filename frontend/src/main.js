@@ -1,5 +1,5 @@
 import "./style.css";
-import { elevenlabsSTT, elevenlabsTTS } from "./elevenlabs_tester.js";
+import { elevenlabsSTT, elevenlabsTTS, stopElevenLabsAudio } from "./elevenlabs_tester.js";
 
 // Backend origin. In dev, Vite reads this from .env.local (copy .env.example);
 // in production it's set at build time via the platform's env vars (Vercel).
@@ -98,6 +98,47 @@ const ICONS = {
 };
 const icon = t => ICONS[t] || "fitness_center";
 
+// In-app replacement for the browser's confirm(): resolves true on the confirm button,
+// false on Cancel, Escape or a tap outside. A second call while one is open cancels the
+// first (resolves it false) instead of stacking two dialogs.
+let appConfirmResolve = null;
+
+function appConfirm({ message, title = "", confirmText = "OK", cancelText = "Cancel", danger = false }) {
+  return new Promise((resolve) => {
+    if (appConfirmResolve) appConfirmResolve(false);
+    appConfirmResolve = resolve;
+    const titleEl = $("app-confirm-title");
+    titleEl.textContent = title;
+    titleEl.classList.toggle("hidden", !title);
+    $("app-confirm-msg").textContent = message;
+    const ok = $("app-confirm-ok");
+    ok.textContent = confirmText;
+    ok.classList.toggle("bg-error", danger);
+    ok.classList.toggle("text-white", danger);
+    ok.classList.toggle("bg-primary", !danger);
+    ok.classList.toggle("text-on-primary", !danger);
+    $("app-confirm-cancel").textContent = cancelText;
+    const m = $("app-confirm-modal");
+    m.classList.remove("hidden");
+    m.classList.add("flex");
+    // A destructive question starts on Cancel so a stray Enter can't confirm it.
+    (danger ? $("app-confirm-cancel") : ok).focus();
+  });
+}
+
+function closeAppConfirm(result) {
+  const m = $("app-confirm-modal");
+  m.classList.add("hidden");
+  m.classList.remove("flex");
+  const resolve = appConfirmResolve;
+  appConfirmResolve = null;
+  if (resolve) resolve(result);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && appConfirmResolve) closeAppConfirm(false);
+});
+
 function toast(msg, bad) {
   const t = $("toast");
   t.textContent = msg;
@@ -178,6 +219,24 @@ async function api(method, path, body, _retried) {
     throw Object.assign(new Error(d.error?.message || r.statusText), {status: r.status});
   }
   return d;
+}
+
+// fetch() for the non-JSON voice proxy routes (/v1/voice/tts returns MP3 bytes,
+// /v1/voice/stt takes raw audio), which api() can't carry because it always
+// JSON-encodes the body and JSON-parses the reply. Same auth headers and the
+// same one silent refresh-and-retry on a 401 as api(). Unlike api(), a failed
+// refresh does NOT sign the user out or change screens: these calls are
+// optional (the caller falls back to the free voice), and the next real api()
+// call handles an ended session exactly as it always has.
+async function authedFetch(path, init = {}, _retried) {
+  const headers = {"X-Device-Id": DEV, ...(init.headers || {})};
+  if (AT) headers["Authorization"] = "Bearer " + AT;
+  const r = await fetch(API_BASE + path, {...init, headers});
+  if (r.status === 401 && RT && !_retried) {
+    await refreshTokenAcrossTabs();
+    return authedFetch(path, init, true);
+  }
+  return r;
 }
 
 // A managed account (student/patient/child using someone else's invite
@@ -699,7 +758,6 @@ function renderActivityHeatmap(daily) {
 // ── custom exercises (4.4) — personal, fixed-target exercises, never suggested ──
 let customExercises = [];
 let customMeasurementType = "reps";
-let customPhase = "name"; // name -> type
 const CUSTOM_TYPES = [["reps","Reps"],["distance","Distance"],["duration","Time"]];
 const CUSTOM_TYPE_UNIT = { reps: "count", distance: "km", duration: "min" };
 
@@ -715,10 +773,14 @@ function updateCustomTargetFields(type, setsWrapId, amountLabelId) {
 async function loadCustomExerciseSection() {
   $("custom-name").value = "";
   $("custom-err").className = "hidden";
-  $("custom-type-wrap").classList.add("hidden");
-  $("custom-continue-btn").textContent = "Continue";
+  // One screen: the name, how it is counted, and the target — nothing is hidden
+  // behind a Continue step any more (the options used to look like they didn't exist).
   customMeasurementType = "reps";
-  customPhase = "name";
+  $("custom-target-sets").value = "2";
+  $("custom-target-amount").value = "";
+  renderCustomTypeChips();
+  updateCustomTargetFields("reps", "custom-target-sets-wrap", "custom-target-amount-label");
+  $("custom-continue-btn").textContent = "Save";
   const d = await api("GET", "/v1/custom-exercises");
   customExercises = d.custom_exercises;
   renderCustomList();
@@ -751,23 +813,17 @@ function renderCustomTypeChips() {
 // default_sets/default_amount. Logging happens separately, whenever the user
 // actually does it, via its card in the "Your Own Exercises" section on Home.
 function customContinue() {
-  if (customPhase === "type") {
-    const amount = parseFloat($("custom-target-amount").value);
-    if (!amount || amount <= 0) { toast("Enter a target greater than zero.", true); return; }
-    const sets = parseInt($("custom-target-sets").value, 10) || 1;
-    submitCustomCreate(amount, sets);
-    return;
-  }
   const name = $("custom-name").value.trim();
   if (!name) { toast("Type a name first", true); return; }
   const match = customExercises.find(c => c.name.toLowerCase() === name.toLowerCase());
   if (match) { toast(`You already have "${match.name}" — log it from the Home screen`, true); return; }
-  customMeasurementType = "reps";
-  customPhase = "type";
-  $("custom-type-wrap").classList.remove("hidden");
-  renderCustomTypeChips();
-  updateCustomTargetFields("reps", "custom-target-sets-wrap", "custom-target-amount-label");
-  $("custom-continue-btn").textContent = "Save";
+  const amount = parseFloat($("custom-target-amount").value);
+  if (!amount || amount <= 0) { toast("Enter a target greater than zero.", true); return; }
+  // Distance and time are a single effort: their Sets box is hidden, so its stale
+  // value (default 2) must never be sent.
+  const single = customMeasurementType === "distance" || customMeasurementType === "duration";
+  const sets = single ? 1 : (parseInt($("custom-target-sets").value, 10) || 1);
+  submitCustomCreate(amount, sets);
 }
 
 async function submitCustomCreate(amount, sets) {
@@ -804,7 +860,7 @@ async function renameCustomPrompt(id) {
 }
 
 async function deleteCustomExercise(id) {
-  if (!confirm("Delete this exercise?")) return;
+  if (!(await appConfirm({ message: "Delete this exercise?", confirmText: "Delete", danger: true }))) return;
   try {
     await api("DELETE", `/v1/custom-exercises/${id}`);
     const d = await api("GET", "/v1/custom-exercises");
@@ -951,32 +1007,9 @@ async function loadHome() {
     taxUnitLookup[a.activity_type] = a.amount_unit;
   });
 
-  // Merge peak targets from d.progression for exercises in the user's plan/history
-  (d.progression || []).forEach(act => {
-    const actKey = act.activity_type;
-    const name = act.display_name || taxLookup[actKey] || actKey;
-    let peakVal = 0;
-    let peakDate = "";
-    (act.points || []).forEach(pt => {
-      const v1 = parseFloat(pt.old_target) || 0;
-      const v2 = parseFloat(pt.new_target) || 0;
-      const maxPt = Math.max(v1, v2);
-      if (maxPt > peakVal) {
-        peakVal = maxPt;
-        peakDate = pt.applied_at || "";
-      }
-    });
-    if (peakVal > 0) {
-      if (!pbMap[actKey] || (pbMap[actKey][0] && peakVal > pbMap[actKey][0].value)) {
-        pbMap[actKey] = [{
-          value: peakVal,
-          unit: taxUnitLookup[actKey] || "count",
-          achieved_at: peakDate,
-          display_name: name,
-        }];
-      }
-    }
-  });
+  // A PR is what the user actually achieved, one per exercise they have logged (the server derives it).
+  // Target peaks from progression used to be merged in here too, which showed a PR for exercises
+  // that were never done, so they were removed.
 
   const pbKeys = Object.keys(pbMap).filter(k => Array.isArray(pbMap[k]) && pbMap[k].length > 0);
   $("h-personal-bests-section").classList.toggle("hidden", !pbKeys.length);
@@ -1113,7 +1146,7 @@ async function logCustomCard(id) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function send(type, amount, sets, workoutSessionId, setAmounts) {
+async function send(type, amount, sets, workoutSessionId, setAmounts, replaceToday) {
   try {
     // set_amounts (per-set breakdown) replaces amount/sets entirely when
     // given — the backend derives sets_done/amount_per_set from the array
@@ -1122,6 +1155,9 @@ async function send(type, amount, sets, workoutSessionId, setAmounts) {
     const body = setAmounts ? {activity_type: type, set_amounts: setAmounts}
                             : {activity_type: type, amount, sets};
     if (workoutSessionId) body.workout_session_id = workoutSessionId;
+    // Workout Player only: it keeps ONE entry per exercise per day, so a
+    // save replaces today's earlier one instead of adding on top of it.
+    if (replaceToday) body.replace_today = true;
     const d = await api("POST", "/v1/activities", body);
     const l = d.logged[0];
     toast(l.implausible
@@ -1245,21 +1281,84 @@ function speakWithBrowserTTS(text) {
 // never be stuck with no voice response just because a paid API hiccuped.
 async function speakVitaText(text) {
   if (isElevenLabsEnabled()) {
-    try { await elevenlabsTTS(text); return; }
+    try { await elevenlabsTTS(text, authedFetch); return; }
     catch (e) { console.error("ElevenLabs TTS failed, falling back to free voice:", e); }
   }
   await speakWithBrowserTTS(text);
 }
 
-async function transcribeAudio(float32Array, sampleRate) {
-  if (isElevenLabsEnabled()) {
-    try { return await elevenlabsSTT(float32Array, sampleRate); }
+// The server upload is the original compressed recording (a few KB/s), not the
+// decoded PCM — 16-bit PCM is ~32 KB/s and would hit the API's 1 MiB request
+// cap after ~30 s of speech. A clip too big even compressed, or one with no
+// original blob, simply uses the free Whisper path below, which needs only the
+// decoded samples.
+const MAX_PREMIUM_UPLOAD_BYTES = 900 * 1024;
+
+async function transcribeAudio(float32Array, sampleRate, recordedBlob) {
+  if (isElevenLabsEnabled() && recordedBlob && recordedBlob.size <= MAX_PREMIUM_UPLOAD_BYTES) {
+    try { return await elevenlabsSTT(recordedBlob, authedFetch); }
     catch (e) {
       console.error("ElevenLabs STT failed, falling back to free transcription:", e);
       toast("Premium voice unavailable — using free transcription instead", true);
     }
   }
   return await transcribeWithWhisper(float32Array);
+}
+
+// Set while toggleWhisperRecording is acquiring the mic and speaking Vita's
+// greeting — before isWhisperRecording flips true. Without it, a second tap in
+// that window passed the "already recording?" check and started a second,
+// overlapping MediaRecorder.
+let isStartingRecording = false;
+
+// Identifies the current voice attempt. Starting one takes a new number; the
+// cross button (cancelVoiceLog) bumps it. Every async step below compares the
+// number it started with, so a cancelled attempt is never transcribed, sent for
+// extraction, rendered or spoken — whichever stage it was in when cancelled.
+let voiceRunId = 0;
+
+// Puts the mic button back to its idle look. The processing path leaves it on
+// the hourglass, and on a successful extraction nothing ever restored it.
+function resetMicFab() {
+    const icon = $("main-mic-icon");
+    const fab = $("main-mic-fab");
+    if (icon) icon.textContent = "mic";
+    if (fab) {
+        fab.classList.remove("bg-error", "bg-surface-variant");
+        fab.classList.add("bg-primary-fixed");
+    }
+}
+
+// Safari/iOS records MP4/AAC, not WebM, so the recorder's real type is used
+// instead of a hardcoded "audio/webm". undefined lets the browser choose.
+function pickRecorderMimeType() {
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return undefined;
+    return ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]
+        .find(t => MediaRecorder.isTypeSupported(t));
+}
+
+// Decodes a recorded clip to the 16 kHz mono Float32Array both transcribers
+// need. Some browsers reject a custom AudioContext sample rate or ignore it
+// when decoding, so fall back to a default context and resample explicitly.
+async function decodeRecordingTo16k(blob) {
+    const arrayBuffer = await blob.arrayBuffer();
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    let ctx;
+    try { ctx = new Ctx({ sampleRate: 16000 }); }
+    catch (_) { ctx = new Ctx(); }
+    try {
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        if (audioBuffer.sampleRate === 16000) return audioBuffer.getChannelData(0);
+        const offline = new OfflineAudioContext(1, Math.max(1, Math.ceil(audioBuffer.duration * 16000)), 16000);
+        const src = offline.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(offline.destination);
+        src.start();
+        const rendered = await offline.startRendering();
+        return rendered.getChannelData(0);
+    } finally {
+        if (ctx.close) ctx.close().catch(() => {});
+    }
 }
 
 function stopWhisperRecording() {
@@ -1272,12 +1371,17 @@ function stopWhisperRecording() {
     $("main-mic-fab").classList.add("bg-primary-fixed");
 }
 
-function finalizeVoiceSubmit() {
-    if (voiceTranscript.trim()) {
+function finalizeVoiceSubmit(runId = voiceRunId) {
+    // Whisper returns punctuation-only text like "." for silence. Sending that
+    // would spend one of the user's daily voice attempts (the server counts the
+    // attempt before it runs the model) for a guaranteed empty result.
+    if (/[\p{L}\p{N}]/u.test(voiceTranscript || "")) {
         toast("Processing final transcript...");
-        voiceSubmitTranscript(voiceTranscript);
+        voiceSubmitTranscript(voiceTranscript, runId);
     } else {
-        toast("No speech detected.");
+        // Used to only toast, leaving the modal on "Processing..." and the mic
+        // button on the hourglass with no way forward.
+        showVoiceFallback("No speech detected. Please tap Try Again and speak after the greeting.");
     }
 }
 
@@ -1350,36 +1454,45 @@ async function toggleWhisperRecording() {
     }
 
     // Start recording
+    if (isStartingRecording) return; // mic is still opening / greeting is playing
+    isStartingRecording = true;
+    const myRun = ++voiceRunId;
+    let stream = null;
     try {
         voiceTranscript = "";
         audioChunks = [];
 
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const recordingStream = stream;
+        const mimeType = pickRecorderMimeType();
+        mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 
         mediaRecorder.ondataavailable = (e) => {
             if (e.data.size > 0) audioChunks.push(e.data);
         };
 
         mediaRecorder.onstop = async () => {
-            // User hit stop, decode WebM to PCM AudioBuffer
-            const blob = new Blob(audioChunks, { type: 'audio/webm' });
-            const audioCtx = new window.AudioContext({ sampleRate: 16000 });
-            const arrayBuffer = await blob.arrayBuffer();
-            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-            const float32Array = audioBuffer.getChannelData(0);
-
-            // Stop the tracks to release mic
-            stream.getTracks().forEach(t => t.stop());
-
+            // Everything from decoding onward is inside the try. Decoding used
+            // to sit outside it, so a decode failure (empty clip, a format the
+            // browser can't decode) threw into nowhere and left the UI stuck
+            // on "Processing..." forever.
             try {
-                voiceTranscript = await transcribeAudio(float32Array, 16000);
-                finalizeVoiceSubmit();
+                if (myRun !== voiceRunId) return;   // cancelled while recording: discard the audio
+                const blob = new Blob(audioChunks, { type: (mediaRecorder && mediaRecorder.mimeType) || mimeType || 'audio/webm' });
+                if (blob.size === 0) throw new Error("No audio was captured.");
+                const float32Array = await decodeRecordingTo16k(blob);
+                if (myRun !== voiceRunId) return;   // cancelled while decoding
+                const transcript = await transcribeAudio(float32Array, 16000, blob);
+                if (myRun !== voiceRunId) return;   // cancelled while transcribing: drop the result
+                voiceTranscript = transcript;
+                finalizeVoiceSubmit(myRun);
             } catch (e) {
-                toast("Transcription error: " + e.message, true);
-                $("main-mic-icon").textContent = "mic";
-                $("main-mic-fab").classList.remove("bg-surface-variant");
-                $("main-mic-fab").classList.add("bg-primary-fixed");
+                if (myRun !== voiceRunId) return;   // an error from a cancelled attempt is not shown
+                console.error("Voice processing error:", e);
+                showVoiceFallback("Couldn't process that recording (" + (e.message || "unknown error") + "). Please tap Try Again.");
+            } finally {
+                // Always release the mic, including on failure.
+                recordingStream.getTracks().forEach(t => t.stop());
             }
         };
 
@@ -1397,8 +1510,17 @@ async function toggleWhisperRecording() {
         $("voice-modal-title").textContent = "Vita is here...";
         await vitaGreet();
 
+        // The user may have closed the modal while the greeting was playing;
+        // don't start recording behind a hidden modal.
+        if (myRun !== voiceRunId || $("voice-modal").classList.contains("hidden")) {
+            stream.getTracks().forEach(t => t.stop());
+            isStartingRecording = false;
+            return;
+        }
+
         mediaRecorder.start();
         isWhisperRecording = true;
+        isStartingRecording = false;
 
         // Show recording icon constantly
         $("main-mic-icon").textContent = "graphic_eq";
@@ -1440,16 +1562,19 @@ async function toggleWhisperRecording() {
 
     } catch (e) {
         console.error("Mic Init Error:", e);
+        isStartingRecording = false;
+        if (stream) stream.getTracks().forEach(t => t.stop());
         showVoiceFallback("Microphone Error: " + (e.message || "Unknown error"));
     }
 }
 
-async function voiceSubmitTranscript(transcript) {
+async function voiceSubmitTranscript(transcript, runId = voiceRunId) {
   toast("Extracting...");
   try {
     const res = await api("POST", "/v1/voice/extract", { transcript });
+    if (runId !== voiceRunId) return;   // cancelled while extracting: don't render or speak the reply
     if (res.failed || !res.entries || res.entries.length === 0) {
-      showVoiceFallback("Extraction failed. Please type instead or enter manually.");
+      showVoiceFallback(`I heard "${transcript.trim().slice(0, 80)}" but couldn't find an exercise with an amount in it. Try again, e.g. "20 pushups" or "walked 2 kilometers", or log it manually.`);
       return;
     }
     voiceEntries = res.entries;
@@ -1474,6 +1599,7 @@ async function voiceSubmitTranscript(transcript) {
         }
     }
   } catch (e) {
+    if (runId !== voiceRunId) return;
     showVoiceFallback(e.message || "Extraction failed. Please type instead.");
   }
 }
@@ -1495,6 +1621,7 @@ let voiceReplyText = "";
 
 function renderVoiceConfirmation(replyText) {
   if (replyText) voiceReplyText = replyText;
+  resetMicFab();
   $("voice-modal").classList.remove("hidden");
   $("voice-input-fallback").classList.add("hidden");
 
@@ -1533,7 +1660,9 @@ function renderVoiceConfirmation(replyText) {
   
   $("voice-tiles").innerHTML = voiceEntries.map((e, i) => {
     const name = escapeHtml(e.activity_name || e.activity_type);
-    const unit = e.unit === "count" ? "" : e.unit;
+    // Display words only — e.unit itself (count / km / min / sec) is what gets saved.
+    const unitLabel = ({count: "reps", km: "km", min: "min", sec: "sec"})[e.unit] || e.unit || "";
+    const estimated = !!e.estimated_from_minutes;   // distance worked out from a time (e.g. "walked 30 minutes")
     return e.set_amounts.map((target, idx) => `
       <div class="flex items-center gap-1.5 cursor-pointer select-none" onclick="editVoiceValue(${i}, ${idx})" title="Tap to edit this value">
         <div class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-sm transition-all bg-white/70 border border-black/10">
@@ -1541,7 +1670,7 @@ function renderVoiceConfirmation(replyText) {
         </div>
         <div class="flex-1 h-11 rounded-xl px-sm flex items-center justify-between shadow-sm border transition-all bg-white/75 border-black/5">
           <span class="text-xs font-bold text-on-background">${name} - Set ${idx + 1}</span>
-          <span class="text-xs font-bold text-secondary">${target}${unit}</span>
+          <span class="text-xs font-bold text-secondary">${estimated ? "≈ " : ""}${target} ${unitLabel}${estimated ? ` (from ${e.estimated_from_minutes} min)` : ""}</span>
         </div>
       </div>`).join("");
   }).join("");
@@ -1567,6 +1696,9 @@ function showVoiceFallback(msg) {
   if (fallbackMsgEl) fallbackMsgEl.textContent = msg || "We couldn't hear you. Please try again or log manually in the workout player.";
 
   $("voice-modal").classList.remove("hidden");
+  $("voice-modal-title").textContent = "Vita";
+  resetMicFab();
+  $("voice-done-btn")?.classList.add("hidden");
   $("voice-tiles").classList.add("hidden");
   $("voice-raw-transcript").classList.add("hidden");
   $("voice-speed-stats").classList.add("hidden");
@@ -1638,18 +1770,28 @@ async function confirmVoiceLog() {
   }
 }
 
+// Speak Again: close this confirmation and record afresh — the same two steps the
+// Try Again button uses. (This used to call startVoiceLogging(), a function that
+// has never existed, so the popup closed and nothing recorded.)
 function editVoiceLog() {
   cancelVoiceLog();
-  startVoiceLogging();
+  toggleWhisperRecording();
 }
 
 function cancelVoiceLog() {
+  voiceRunId++;   // whatever the old attempt is doing (recording / transcribing / extracting / speaking) is now stale
   $("voice-modal").classList.add("hidden");
   voiceEntries = [];
   voiceTranscript = "";
   if (isWhisperRecording) {
-    toggleWhisperRecording(); // stop if running
+    // Used to call toggleWhisperRecording(), which STOPPED the recording and so
+    // still transcribed and submitted it. Now the mic is just switched off; the
+    // recorder's onstop sees a stale run id and discards the audio.
+    stopWhisperRecording();
   }
+  if (window.speechSynthesis) window.speechSynthesis.cancel();   // stop a greeting/reply being spoken
+  stopElevenLabsAudio();                                         // ...including the premium voice, immediately
+  resetMicFab();
   $("voice-confirm-btn").disabled = false;
   $("voice-confirm-btn").textContent = "Confirm";
 }
@@ -1781,9 +1923,24 @@ function playerAdjustDistance(delta) {
   updatePlayerDoneButtonText();
 }
 
+// An exercise the player already saved today is shown locked (values visible,
+// not editable) with an Edit button; Edit opens it for changes, and Mark Done
+// then OVERWRITES today's entry and locks it again. Per item, never carried
+// to the next exercise or the next day (the server only returns player_log
+// for today).
+function playerEntryLocked(i) {
+  return !!(i && i.player_log && !i._editing);
+}
+
+function enterPlayerEdit(i) {
+  i._editing = true;
+  renderPlayerExercise();
+}
+
 function updatePlayerDoneButtonText() {
   const i = PLAYER_ITEMS[playerIndex];
   if (!i) return;
+  if (playerEntryLocked(i)) { $("pl-done-btn").textContent = "Edit"; return; }
   const isDistOrDur = i.prescription_type === "distance" || i.prescription_type === "duration";
   if (isDistOrDur) {
     const amt = playerActualAmount != null ? playerActualAmount : 0;
@@ -1846,16 +2003,23 @@ function renderPlayerExercise() {
   // locked to exactly 1 "set" server-side) keep the old one-tap button.
   // Everything else (reps/hold) gets the real per-set slide table instead.
   const singleEffort = i.prescription_type === "distance" || i.prescription_type === "duration";
-  $("pl-done-btn").classList.toggle("hidden", !singleEffort);
+  const locked = playerEntryLocked(i);
+  // Reps/hold exercises have no button until they've been saved: then it is
+  // the Edit / Mark Done control for correcting that saved entry.
+  $("pl-done-btn").classList.toggle("hidden", !(singleEffort || i.player_log));
   $("pl-sets-table").classList.toggle("hidden", singleEffort);
   $("pl-gps-btn").classList.toggle("hidden", !(i.activity_type === "walk" || i.activity_type === "running"));
 
   if ($("pl-distance-editor")) {
     $("pl-distance-editor").classList.toggle("hidden", !singleEffort);
     if (singleEffort) {
-      if (playerActualAmount == null) {
-        playerActualAmount = 0.0;
+      if (locked) {
+        playerActualAmount = i.player_log.amount; // always show what was saved
+      } else if (playerActualAmount == null) {
+        playerActualAmount = i.player_log ? i.player_log.amount : 0.0;
       }
+      $("pl-distance-editor").classList.toggle("pointer-events-none", locked);
+      $("pl-distance-editor").classList.toggle("opacity-60", locked);
       if ($("pl-target-val")) $("pl-target-val").textContent = `${i.amount} ${i.unit || "km"}`;
       if ($("pl-distance-input")) $("pl-distance-input").value = playerActualAmount.toFixed(2);
       if ($("pl-distance-unit")) $("pl-distance-unit").textContent = i.unit || "km";
@@ -1866,18 +2030,30 @@ function renderPlayerExercise() {
     $("pl-done-btn").disabled = false;
     updatePlayerDoneButtonText();
   } else {
-    const targets = i.set_targets || Array(i.sets).fill(i.amount);
-    playerSetDone = targets.map(() => false);
+    // Already saved today: show exactly what was saved (all sets ticked).
+    const saved = playerSavedSetValues(i);
+    const targets = saved || i.set_targets || Array(i.sets).fill(i.amount);
+    playerSetDone = targets.map(() => !!saved);
     // What actually gets logged per set — starts equal to the target, but
     // editable before marking done, for a set done with more or less than
     // planned (e.g. only managed 9 of a planned 11 reps).
     playerSetActual = targets.slice();
     renderSetsTable(i);
+    if (saved) {
+      $("pl-done-btn").disabled = false;
+      $("pl-done-btn").textContent = locked ? "Edit" : "Mark Done";
+    }
   }
 }
 
+// The per-set values saved today by the player, or null if none.
+function playerSavedSetValues(i) {
+  if (!i.player_log) return null;
+  return i.player_log.set_amounts || Array(i.player_log.sets).fill(i.player_log.amount);
+}
+
 function renderSetsTable(i) {
-  const targets = i.set_targets || Array(i.sets).fill(i.amount);
+  const targets = playerSavedSetValues(i) || i.set_targets || Array(i.sets).fill(i.amount);
   const unit = i.prescription_type === "hold" ? "s" : "";
   // Row shape matches Exercise workout Player.html's own sets table: the
   // tile on the left marks the set done (reading whatever's currently in
@@ -1900,7 +2076,7 @@ function renderSetsTable(i) {
                   ${done ? "bg-white/80 border-primary/50" : "bg-white/75 border-black/5"}">
         <span class="text-xs font-bold text-on-background shrink-0">Set ${idx + 1}</span>
         <div class="flex items-center gap-1">
-          <input type="number" step="any" value="${actual}" ${done ? "disabled" : ""}
+          <input type="number" step="any" value="${actual}" ${done && !i._editing ? "disabled" : ""}
             onchange="updatePlayerSetActual(${idx}, this.value)"
             class="no-spinner w-14 text-center text-sm font-bold rounded-lg py-1 border-none outline-none
                    ${done ? "bg-transparent text-primary" : "bg-surface-container-low text-on-background"}">
@@ -1919,6 +2095,7 @@ function updatePlayerSetActual(idx, value) {
 
 function playerToggleSet(idx) {
   if (!$("pl-rest").classList.contains("hidden")) return;
+  if (PLAYER_ITEMS[playerIndex].player_log) return; // locked, or editing via Mark Done
   playerSetDone[idx] = !playerSetDone[idx];
   const i = PLAYER_ITEMS[playerIndex];
   renderSetsTable(i);
@@ -1934,13 +2111,14 @@ async function playerSubmitSets() {
   renderSetsTable(i);
   // Log what was actually edited per set (defaults to the target for any
   // set left unedited), not blindly the planned targets.
-  const result = await send(i.activity_type, null, null, playerSessionId, playerSetActual);
+  const result = await send(i.activity_type, null, null, playerSessionId, playerSetActual, true);
   if (!result) {
     // Save failed — reset table so the user can retry.
     playerSetDone = targets.map(() => false);
     renderSetsTable(i);
     return;
   }
+  playerRememberSaved(i, playerSetActual.length, playerSetActual.slice());
   if (playerIndex === PLAYER_ITEMS.length - 1) {
     // Last exercise: show soreness on this page (same UX as every other
     // exercise), then call finishPlayerSession once user responds.
@@ -1963,13 +2141,50 @@ async function playerSubmitSets() {
 function playerGo(delta) {
   const next = playerIndex + delta;
   if (next < 0 || next >= PLAYER_ITEMS.length) return;
+  if (PLAYER_ITEMS[playerIndex]) PLAYER_ITEMS[playerIndex]._editing = false; // abandoned edit -> locked again
   playerIndex = next;
   playerActualAmount = null;
   renderPlayerExercise();
 }
 
+// Remembers what the player just saved for this exercise (same shape the
+// server returns as player_log) so it shows locked from now on.
+function playerRememberSaved(i, sets, setAmounts) {
+  const total = setAmounts.reduce((a, b) => a + b, 0);
+  i.player_log = {sets, amount: total / sets, set_amounts: setAmounts.length > 1 || sets > 1 ? setAmounts : null};
+  i.completed = true;
+  i._editing = false;
+}
+
+// Mark Done while editing a saved entry: overwrites it, stays on this
+// exercise (no rest timer / soreness prompt again), and locks it.
+async function playerSaveEdit(i) {
+  const singleEffort = i.prescription_type === "distance" || i.prescription_type === "duration";
+  let result;
+  if (singleEffort) {
+    const amt = playerActualAmount;
+    if (!(amt > 0)) { toast("Enter an amount greater than zero.", true); return; }
+    $("pl-done-btn").disabled = true;
+    result = await send(i.activity_type, amt, i.sets, playerSessionId, null, true);
+    if (result) { i.player_log = {sets: 1, amount: amt, set_amounts: null}; i.completed = true; i._editing = false; }
+  } else {
+    const vals = Array.from(document.querySelectorAll("#pl-sets-table input"), el => parseFloat(el.value));
+    if (!vals.length || vals.some(v => !Number.isFinite(v) || v <= 0)) {
+      toast("Enter an amount greater than zero for every set.", true);
+      return;
+    }
+    $("pl-done-btn").disabled = true;
+    result = await send(i.activity_type, null, null, playerSessionId, vals, true);
+    if (result) playerRememberSaved(i, vals.length, vals);
+  }
+  $("pl-done-btn").disabled = false;
+  renderPlayerExercise();
+}
+
 async function playerMarkDone() {
   const i = PLAYER_ITEMS[playerIndex];
+  if (playerEntryLocked(i)) { enterPlayerEdit(i); return; }   // Edit tapped
+  if (i._editing) { await playerSaveEdit(i); return; }         // Mark Done after Edit
   const singleEffort = i.prescription_type === "distance" || i.prescription_type === "duration";
   const amountToLog = singleEffort ? (playerActualAmount != null ? playerActualAmount : 0) : i.amount;
 
@@ -1995,12 +2210,14 @@ async function playerMarkDone() {
     return;
   }
 
-  const result = await send(i.activity_type, amountToLog, i.sets, playerSessionId);
+  const result = await send(i.activity_type, amountToLog, i.sets, playerSessionId, null, true);
   if (!result) {
     $("pl-done-btn").disabled = false;
     updatePlayerDoneButtonText();
     return;
   }
+  i.player_log = {sets: 1, amount: amountToLog, set_amounts: null};
+  i.completed = true;
   if (playerIndex === PLAYER_ITEMS.length - 1) {
     playerPendingSorenessType = i.activity_type;
     playerPendingSorenessAction = finishPlayerSession;
@@ -2197,7 +2414,7 @@ async function submitPlayerEdit() {
 
 async function playerRemoveCurrent() {
   const i = PLAYER_ITEMS[playerIndex];
-  if (!confirm(`Remove ${i.display_name} from today's plan?`)) return;
+  if (!(await appConfirm({ message: `Remove ${i.display_name} from today's plan?`, confirmText: "Remove", danger: true }))) return;
   try {
     await api("DELETE", `/v1/program/entries/${i.activity_type}`);
   } catch (e) { toast(e.message, true); return; }
@@ -2671,10 +2888,11 @@ async function addFromCatalogue(activityType, overrideConfirmed, sets, amount, a
       auto_progress: autoProgress !== false,
     });
     if (d.needs_confirmation) {
-      const ok = confirm(
-        d.warning_text + "\n\nClick OK only if a doctor has advised you to do this. " +
-        "Click Cancel to keep it blocked."
-      );
+      const ok = await appConfirm({
+        message: d.warning_text + "\n\nOnly continue if a doctor has advised you to do this. " +
+          "Keep blocked leaves it out of your plan.",
+        confirmText: "Add anyway", cancelText: "Keep blocked", danger: true,
+      });
       if (ok) await addFromCatalogue(activityType, true, sets, amount, autoProgress, setAmounts);
       return;
     }
@@ -2745,23 +2963,38 @@ async function saveProfileEditor() {
     const conditionsChanged = editPicked.size !== originalCodes.size
       || [...editPicked].some(c => !originalCodes.has(c));
 
-    let d;
-    if (conditionsChanged) {
-      // Condition changes need the full safety-grid re-check (14.4), so this
-      // one case still goes through onboarding rather than the quick-edit path.
-      d = await api("POST", "/v1/profile/onboarding", {
-        age: newAge, goal: editGoal, experience_band: editBand,
-        unit_preference: editProfile.unit_preference, condition_codes: [...editPicked],
-      });
-    } else {
+    // Changing the experience level rescales the plan on the server. Moving DOWN
+    // comes back with needs_confirmation first (nothing saved yet); on OK it is
+    // sent again with confirm_rescale. An increase applies straight away.
+    const submit = async (confirmRescale) => {
+      if (conditionsChanged) {
+        // Condition changes need the full safety-grid re-check (14.4), so this
+        // one case still goes through onboarding rather than the quick-edit path.
+        return api("POST", "/v1/profile/onboarding", {
+          age: newAge, goal: editGoal, experience_band: editBand,
+          unit_preference: editProfile.unit_preference, condition_codes: [...editPicked],
+          ...(confirmRescale ? { confirm_rescale: true } : {}),
+        });
+      }
       // No condition change — use the lightweight edit (3.4), only send what moved.
       const changed = {};
       if (newAge !== editProfile.age) changed.age = newAge;
       if (editGoal !== editProfile.goal) changed.goal = editGoal;
       if (editBand !== editProfile.experience_band) changed.experience_band = editBand;
-      if (Object.keys(changed).length) await api("PUT", "/v1/profile", changed);
-      d = {};
+      if (!Object.keys(changed).length) return {};
+      if (confirmRescale) changed.confirm_rescale = true;
+      return api("PUT", "/v1/profile", changed);
+    };
+    let resp = await submit(false);
+    if (resp.needs_confirmation) {
+      // stay on the editor if they decline; nothing was saved
+      if (!(await appConfirm({ message: resp.message, confirmText: "Continue" }))) return;
+      resp = await submit(true);
     }
+    // The PUT's reply is a profile summary, not an onboarding result — only the
+    // onboarding path can mean "referred".
+    const d = conditionsChanged ? resp : {};
+    const rescaled = resp.plan_rescaled || [];
     closeProfileEditor();
     if (d.referred) {
       $("refer-msg").textContent = d.message;
@@ -2770,7 +3003,9 @@ async function saveProfileEditor() {
       return;
     }
     await loadProfile();
-    toast("Profile updated");
+    toast(rescaled.length
+      ? `Profile updated · ${rescaled.length} exercise${rescaled.length === 1 ? "" : "s"} adjusted for your new level`
+      : "Profile updated");
   } catch (e) {
     $("cm-err").textContent = e.message;
     $("cm-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs";
@@ -3676,7 +3911,7 @@ async function doLogout() {
   localStorage.clear(); AT=null; RT=null; go("auth");
 }
 async function delAccount() {
-  if (!confirm("Delete your account?")) return;
+  if (!(await appConfirm({ message: "Delete your account?", confirmText: "Delete", danger: true }))) return;
   // DELETE /v1/account now requires re-confirming the password (found live,
   // third-pass code audit — the most destructive action in the app used to
   // need only a valid session, no re-authentication).
@@ -3898,18 +4133,24 @@ async function renderPendingBuild() {
     api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/suggested-exercises`),
   ]);
   PENDING_SUGGESTIONS_CACHE = suggestions;
+  PENDING_ENTRIES_CACHE = entries;
   const suggestionsHtml = renderSuggestionsSection(suggestions);
   const entriesHtml = entries.map(e => {
     const isDist = e.activity_type === "walk" || e.activity_type === "running";
-    const targetDesc = isDist ? `${e.target_amount} km` : `${e.target_sets} x ${e.target_amount}`;
+    const targetDesc = isDist ? `${e.target_amount} km`
+      : (e.set_amounts ? e.set_amounts.join(", ") : `${e.target_sets} x ${e.target_amount}`);
     return `
     <div class="flex items-center justify-between py-sm border-t border-black/5">
       <div class="min-w-0">
         <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
         <p class="font-label-sm text-label-sm text-secondary">${targetDesc} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
       </div>
-      <button onclick="removePendingEntry('${e.activity_type}')" aria-label="Remove"
-        class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>
+      <div class="shrink-0 flex items-center gap-xs">
+        <button onclick="editPendingEntry('${e.activity_type}')" aria-label="Edit"
+          class="bg-black/5 hover:bg-black/10 px-md py-xs rounded-full font-label-bold text-label-bold text-on-background">Edit</button>
+        <button onclick="removePendingEntry('${e.activity_type}')" aria-label="Remove"
+          class="text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>
+      </div>
     </div>`;
   }).join("");
   const customHtml = customEntries.map(e => `
@@ -4162,18 +4403,20 @@ function renderRelationshipDetail(d, suggestions = []) {
     : `Their Plan (${RELATION_LABELS[d.relation_type] || d.relation_type})`;
   const streak = d.streak.current || 0;
   const entries = d.managed_entries || [];
+  MANAGED_ENTRIES_CACHE = entries;
   const overrides = d.safety_overrides || [];
 
   const entriesHtml = entries.length ? entries.map(e => {
     const isDist = e.activity_type === "walk" || e.activity_type === "running";
-    const targetDesc = isDist ? `${e.target_amount} km` : `${e.target_sets} x ${e.target_amount}`;
+    const targetDesc = isDist ? `${e.target_amount} km`
+      : (e.set_targets ? e.set_targets.join(", ") : `${e.target_sets} x ${e.target_amount}`);
     return `
     <div class="flex items-center justify-between py-sm border-t border-black/5">
       <div class="min-w-0">
         <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
         <p class="font-label-sm text-label-sm text-secondary">${targetDesc} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
       </div>
-      <button onclick="editManagedTarget('${e.activity_type}', ${e.target_sets}, ${e.target_amount})"
+      <button onclick="editManagedTarget('${e.activity_type}')"
         class="shrink-0 bg-black/5 hover:bg-black/10 px-md py-xs rounded-full font-label-bold text-label-bold text-on-background">Edit</button>
     </div>`;
   }).join("")
@@ -4215,40 +4458,134 @@ function renderRelationshipDetail(d, suggestions = []) {
     </section>`;
 }
 
-async function editManagedTarget(activityType, currentSets, currentAmount) {
-  const isDist = activityType === "walk" || activityType === "running";
-  let sets = 1;
-  let amount = null;
-  if (isDist) {
-    const val = window.prompt(`Distance in km for ${activityType}:`, currentAmount);
-    if (val === null) return;
-    amount = parseFloat(val);
-  } else {
-    const setsVal = window.prompt(`Sets for ${activityType}:`, currentSets);
-    if (setsVal === null) return;
-    sets = parseInt(setsVal, 10) || 1;
-    const amountVal = window.prompt(`Amount per set for ${activityType}:`, currentAmount);
-    if (amountVal === null) return;
-    amount = parseFloat(amountVal);
-  }
-  if (!amount || amount <= 0) {
-    toast(isDist ? "Enter distance in km." : "Enter an amount greater than zero.", true);
-    return;
-  }
+let MANAGED_ENTRIES_CACHE = [];
+// Set while the Add screen is being used to EDIT an item already on someone's plan.
+let MA_EDIT_TYPE = null;
+
+// Switches the shared "Add to their plan" screen between adding and editing.
+function setManagedModalMode(editType, pending = false) {
+  MA_EDIT_TYPE = editType || null;
+  const editing = !!editType;
+  $("ma-title").textContent = editing ? "Edit their plan item" : "Add to their plan";
+  $("ma-submit-btn").textContent = editing ? "Save" : "Add";
+  $("ma-activity").disabled = editing;
+  // Saving a target doesn't change the auto-adjust choice, and a custom exercise
+  // is a different action, so neither is offered while editing.
+  // For a STAGED item the auto-adjust choice is part of what gets saved, so it stays.
+  $("ma-auto-wrap").classList.toggle("hidden", editing && !pending);
+  $("ma-custom-section").classList.toggle("hidden", editing);
+}
+
+// Edit uses the same screen as Add (so it has the same options, including a
+// different amount for each set), prefilled with what the item is set to now.
+// It used to be two plain prompt() boxes that could only set one number for
+// every set.
+let PENDING_ENTRIES_CACHE = [];
+
+// Opens the Add screen as an editor for one plan item, prefilled. Shared by the
+// live plan (saved with a PUT) and a staged item (re-staged, which replaces it).
+async function openManagedEditScreen(activityType, entry, { perSet, auto, pending }) {
   try {
-    await api("PUT", `/v1/program/entries/${activityType}/target`, {
-      managed_user_id: CURRENT_MANAGED_USER_ID,
-      target_sets: sets, target_amount: amount,
-    });
-    toast("Updated");
-    await openRelationshipDetail(CURRENT_RELATIONSHIP);
+    if (!MANAGED_ACTIVITIES_CACHE.length) {
+      MANAGED_ACTIVITIES_CACHE = (await api("GET", "/v1/taxonomy/activities")).activities;
+    }
+    const act = MANAGED_ACTIVITIES_CACHE.find(a => a.activity_type === activityType);
+    setManagedModalMode(activityType, pending);
+    $("ma-activity").innerHTML =
+      `<option value="${escapeHtml(activityType)}">${escapeHtml(act ? act.display_name : activityType)}</option>`;
+    $("ma-activity").value = activityType;
+    updateManagedActivityFields();   // shows the right fields (and resets the per-set switch) for this activity
+    $("ma-sets").value = entry.target_sets;
+    $("ma-amount").value = entry.target_amount;
+    if (pending) $("ma-auto").checked = auto !== false;
+    if (perSet) {
+      $("ma-per-set-toggle").checked = true;
+      toggleManagedPerSet();
+      MA_EDITOR.set(perSet);
+    }
+    $("managed-add-modal").classList.remove("hidden");
+    $("managed-add-modal").classList.add("flex");
   } catch (e) { toast(e.message, true); }
+}
+
+// Edit uses the same screen as Add (so it has the same options, including a
+// different amount for each set), prefilled with what the item is set to now.
+async function editManagedTarget(activityType) {
+  const entry = MANAGED_ENTRIES_CACHE.find(e => e.activity_type === activityType);
+  if (!entry) return;
+  await openManagedEditScreen(activityType, entry, { perSet: entry.set_targets, pending: false });
+}
+
+// Edit for an item staged before the invite is opened.
+async function editPendingEntry(activityType) {
+  const entry = PENDING_ENTRIES_CACHE.find(e => e.activity_type === activityType);
+  if (!entry) return;
+  await openManagedEditScreen(activityType, entry,
+    { perSet: entry.set_amounts, auto: entry.auto_progress, pending: true });
 }
 
 let MANAGED_ACTIVITIES_CACHE = [];
 
+// Reusable "different amount for each set" editor: renders one input per set
+// (add / remove rows) into `container` and uses event delegation, so it needs
+// no per-modal inline handlers or globals. The self-service Edit and Add
+// screens (pe-/ca- ids) predate this and keep their own copies; any NEW screen
+// that needs per-set amounts should use this instead of copying them again.
+function makePerSetEditor(container) {
+  let values = [];
+  // Keep what the user typed across add/remove re-renders; a blank/invalid
+  // input keeps its previous value here (get() below still reports it as NaN).
+  const flush = () => {
+    container.querySelectorAll("input").forEach((el, idx) => {
+      const v = parseFloat(el.value);
+      if (Number.isFinite(v)) values[idx] = v;
+    });
+  };
+  const render = () => {
+    container.innerHTML = values.map((v, idx) => `
+      <div class="flex items-center justify-between gap-sm">
+        <span class="font-label-bold text-label-bold text-on-surface w-14 shrink-0">Set ${idx + 1}</span>
+        <input type="number" step="any" min="0" value="${v}"
+          class="flex-1 bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        ${values.length > 1 ? `
+        <button type="button" data-remove="${idx}" aria-label="Remove set" class="shrink-0 text-secondary hover:text-error">
+          <span class="material-symbols-outlined text-[20px]">close</span>
+        </button>` : `<span class="w-5 shrink-0"></span>`}
+      </div>`).join("")
+      + `<button type="button" data-add class="flex items-center justify-center gap-1 text-primary font-label-bold text-label-bold py-xs">
+           <span class="material-symbols-outlined text-[18px]">add</span> Add Set
+         </button>`;
+  };
+  container.addEventListener("click", (ev) => {
+    const rm = ev.target.closest("[data-remove]");
+    if (rm) { flush(); values.splice(Number(rm.dataset.remove), 1); render(); return; }
+    if (ev.target.closest("[data-add]")) { flush(); values.push(values[values.length - 1] ?? 1); render(); }
+  });
+  return {
+    set(vals) { values = vals.slice(); render(); },
+    // Reads the inputs as they are right now; an empty box comes back as NaN
+    // so the caller's "every set must be > 0" check catches it.
+    get() { return Array.from(container.querySelectorAll("input"), (el) => parseFloat(el.value)); },
+  };
+}
+
+let MA_EDITOR = null;
+
+function toggleManagedPerSet() {
+  const on = $("ma-per-set-toggle").checked;
+  $("ma-target-fields").classList.toggle("hidden", on);
+  $("ma-per-set-inputs").classList.toggle("hidden", !on);
+  if (on) {
+    if (!MA_EDITOR) MA_EDITOR = makePerSetEditor($("ma-per-set-inputs"));
+    const n = Math.max(1, parseInt($("ma-sets").value, 10) || 1);
+    const amount = parseFloat($("ma-amount").value);
+    MA_EDITOR.set(Array.from({length: n}, () => (Number.isFinite(amount) && amount > 0 ? amount : 1)));
+  }
+}
+
 async function openManagedAddModal() {
   if (!CURRENT_RELATIONSHIP) return;
+  setManagedModalMode(null);
   try {
     const [{ activities }, { blocked }] = await Promise.all([
       api("GET", "/v1/taxonomy/activities"),
@@ -4280,6 +4617,7 @@ async function openManagedAddModal() {
 }
 function closeManagedAddModal() {
   const m = $("managed-add-modal"); m.classList.add("hidden"); m.classList.remove("flex");
+  setManagedModalMode(null);
 }
 
 function updateManagedActivityFields() {
@@ -4316,6 +4654,17 @@ function updateManagedActivityFields() {
       $("ma-amount").value = act.default_amount || "";
     }
   }
+
+  // Per-set amounts only make sense for reps/hold activities (distance and
+  // duration are a single effort). Changing the activity always resets the
+  // toggle, so a stale breakdown for the previous activity can never be sent.
+  const supportsPerSet = !isDistance && (act?.prescription_type === "reps" || act?.prescription_type === "hold");
+  $("ma-per-set-toggle-wrap").classList.toggle("hidden", !supportsPerSet);
+  $("ma-per-set-toggle-label").textContent =
+    act?.prescription_type === "hold" ? "Different hold time for each set" : "Different reps for each set";
+  $("ma-per-set-toggle").checked = false;
+  $("ma-per-set-inputs").classList.add("hidden");
+  if (targetGrid) targetGrid.classList.remove("hidden");
 }
 
 function updateManagedCustomTargetFields() {
@@ -4325,13 +4674,32 @@ function updateManagedCustomTargetFields() {
 async function submitManagedAdd() {
   const activityType = $("ma-activity").value;
   const isDistance = activityType === "walk" || activityType === "running";
+  const perSet = !isDistance && $("ma-per-set-toggle").checked && MA_EDITOR;
+  let setAmounts = null;
+  if (perSet) {
+    setAmounts = MA_EDITOR.get();
+    if (!setAmounts.length || setAmounts.some(v => !Number.isFinite(v) || v <= 0)) {
+      toast("Enter an amount greater than zero for every set.", true);
+      return;
+    }
+  }
   const sets = isDistance ? 1 : (parseInt($("ma-sets").value, 10) || 1);
   const amount = parseFloat($("ma-amount").value);
-  if (!amount || amount <= 0) {
+  if (!perSet && (!amount || amount <= 0)) {
     toast(isDistance ? "Enter distance in km." : "Enter an amount greater than zero.", true);
     return;
   }
   try {
+    if (MA_EDIT_TYPE && !CURRENT_IS_PENDING) {
+      await api("PUT", `/v1/program/entries/${MA_EDIT_TYPE}/target`,
+        perSet
+          ? { managed_user_id: CURRENT_MANAGED_USER_ID, set_amounts: setAmounts }
+          : { managed_user_id: CURRENT_MANAGED_USER_ID, target_sets: sets, target_amount: amount });
+      closeManagedAddModal();
+      toast("Updated");
+      await openRelationshipDetail(CURRENT_RELATIONSHIP);
+      return;
+    }
     if (CURRENT_IS_PENDING) {
       // Staged against the invite itself — materializes automatically the
       // moment the link is opened (app/relationships/service.py's
@@ -4340,16 +4708,18 @@ async function submitManagedAdd() {
       // here — if this still comes back blocked (stale dropdown data), the
       // manager is pointed at Custom Exercise instead of being asked to
       // confirm past it.
-      const d = await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`, {
-        activity_type: activityType, target_sets: sets, target_amount: amount,
-        auto_progress: $("ma-auto").checked,
-      });
+      const d = await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`,
+        perSet
+          ? { activity_type: activityType, set_amounts: setAmounts, auto_progress: $("ma-auto").checked }
+          : { activity_type: activityType, target_sets: sets, target_amount: amount,
+              auto_progress: $("ma-auto").checked });
       if (d.needs_confirmation) {
         toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
         return;
       }
+      const wasEdit = !!MA_EDIT_TYPE;
       closeManagedAddModal();
-      toast("Added to their plan");
+      toast(wasEdit ? "Updated" : "Added to their plan");
       await renderPendingBuild();
       return;
     }
@@ -4365,9 +4735,10 @@ async function submitManagedAdd() {
       toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
       return;
     }
-    await api("PUT", `/v1/program/entries/${activityType}/target`, {
-      managed_user_id: CURRENT_MANAGED_USER_ID, target_sets: sets, target_amount: amount,
-    });
+    await api("PUT", `/v1/program/entries/${activityType}/target`,
+      perSet
+        ? { managed_user_id: CURRENT_MANAGED_USER_ID, set_amounts: setAmounts }
+        : { managed_user_id: CURRENT_MANAGED_USER_ID, target_sets: sets, target_amount: amount });
     closeManagedAddModal();
     toast("Added to their plan");
     await openRelationshipDetail(CURRENT_RELATIONSHIP);
@@ -4494,8 +4865,9 @@ Object.assign(window, {
   playerToggleSet, playerTogglePause,
   openCreateInviteModal, closeCreateInviteModal, createRelationshipInvite, copyInviteLink,
   promptRevokeRelationship, promptDeleteRelationship, closeRevokeModal, executeRevokeRelationship, clearAllRevokedPlans,
-  revokeRelationship, openRelationshipDetail, editManagedTarget,
-  openManagedAddModal, closeManagedAddModal, submitManagedAdd, submitManagedCustomAdd,
+  revokeRelationship, openRelationshipDetail, editManagedTarget, editPendingEntry,
+  openManagedAddModal, closeManagedAddModal, submitManagedAdd, submitManagedCustomAdd, toggleManagedPerSet,
+  closeAppConfirm,
   openPendingBuild, removePendingEntry, togglePendingCondition, savePendingProfile,
   renderExerciseBrowse, editPendingProfile, removePendingCustomExercise,
   updateManagedActivityFields, updateManagedCustomTargetFields, acceptSuggestedExercise,

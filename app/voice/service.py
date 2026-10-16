@@ -16,15 +16,22 @@ def extract_activities(session: Session, user_id: str, transcript: str, *, openr
     session.commit()
 
     rows = session.execute(
-        select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name, ActivityTaxonomy.synonyms)
+        select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name,
+               ActivityTaxonomy.synonyms, ActivityTaxonomy.amount_unit,
+               ActivityTaxonomy.prescription_type, ActivityTaxonomy.est_pace_min_per_km)
     ).all()
-    
+
     valid_codes = set()
     taxonomy_list = []
-    for code, name, synonyms in rows:
+    # Average pace (minutes per km) of each distance exercise, from the taxonomy —
+    # used to turn "walked 30 minutes" into a distance.
+    pace_by_code = {}
+    for code, name, synonyms, amount_unit, prescription_type, pace in rows:
         valid_codes.add(code)
+        if prescription_type == "distance" and pace:
+            pace_by_code[code] = float(pace)
         syn_str = " | ".join(synonyms) if synonyms else "none"
-        taxonomy_list.append(f"- code: {code}, name: {name}, synonyms: {syn_str}")
+        taxonomy_list.append(f"- code: {code}, name: {name}, unit: {amount_unit}, synonyms: {syn_str}")
     
     taxonomy_str = "\n".join(taxonomy_list)
 
@@ -50,7 +57,7 @@ Output Schema (JSON object — single pass, no extra API calls):
       "activity_name": "clean exercise name if not in taxonomy, else null",
       "is_custom": false,
       "set_amounts": [number, number, ...],
-      "unit": "km or count or sec or min",
+      "unit": "the canonical unit, per the UNITS rules below",
       "duration_minutes": null
     }}
   ]
@@ -62,10 +69,21 @@ Rules:
 - set_amounts is an array where EACH item represents ONE set's reps or distance. 
 - CRITICAL: If the transcript specifies multiple sets, you MUST output an array containing the reps repeated for each set (e.g., "X sets of Y reps" becomes [Y, Y, ... repeated X times]). Do NOT just extract the set count.
 - Even a single set must be in a list.
+- Exception — a DISTANCE exercise (its unit above is km) where the user gave only a time and no distance (e.g. "walked for 30 minutes"): output set_amounts as an empty list [] and put the minutes in duration_minutes. Do NOT guess a distance; the app converts the time itself. If the user gave a distance, use it as normal.
 - activity_type must be an exact taxonomy code from the list above, or null.
 - Never output garbled/nonsensical text from the transcript in activity_name. Always clean it up.
 - Never invent reps or sets that were not mentioned.
 - One array item per distinct exercise.
+
+UNITS — CRITICAL. Always output amounts in the canonical unit, never in the unit the user happened to speak:
+- Each taxonomy entry above lists its own unit. For a taxonomy match, set "unit" to exactly that unit and convert every value in set_amounts into it.
+- Distance is always kilometers ("km"): meters divided by 1000 (3000 meters becomes 3), miles multiplied by 1.609, kilometers unchanged. Round to 2 decimals. Never output meters or miles.
+- Time: for a taxonomy match use that entry's own unit (for a hold measured in "sec", 1 minute becomes 60). For a custom exercise, time is "min": seconds divided by 60, hours multiplied by 60.
+- Repetition counts use "count" as the "unit" value (this exact word is how the app saves them). In reply_text, always call them "reps", never "count".
+- In reply_text, whenever you mention an amount, include its unit word: reps for counts, km for distance, minutes for time, seconds for holds (for example "15 reps", "2 km", "45 minutes"). This applies to the spoken reply only — the "unit" field keeps its canonical value.
+- For an exercise NOT in the taxonomy (is_custom: true), choose the unit from what the user measured: a distance gives "km", a time gives "min", anything else gives "count". Decide from the measurement, not from the exercise's name, so cycling, swimming, rowing or anything else behave the same way.
+- If the user gives a number in the canonical unit already (for example "3 km"), keep it as is.
+- Examples: "3000 meters of cycling" becomes a custom entry with unit "km" and set_amounts [3]. "swam for 45 minutes" becomes a custom entry with unit "min" and [45]. "walked 800 meters" becomes unit "km" and [0.8]. "15 reps" becomes unit "count" and [15].
 
 Transcript: "{transcript}"
 Respond ONLY with the JSON object, no explanation, no markdown.
@@ -117,6 +135,19 @@ Respond ONLY with the JSON object, no explanation, no markdown.
                 item["activity_name"] = code
                 
             sets = item.get("set_amounts")
+            has_amount = isinstance(sets, list) and any(
+                isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 for s in sets)
+            minutes = item.get("duration_minutes")
+            pace = pace_by_code.get(item.get("activity_type"))
+            if (not has_amount and pace and isinstance(minutes, (int, float))
+                    and not isinstance(minutes, bool) and minutes > 0):
+                # Distance = time / average pace (done here, not by the model).
+                km = round(minutes / pace, 2)
+                if km > 0:
+                    item["set_amounts"] = [km]
+                    item["unit"] = "km"
+                    item["estimated_from_minutes"] = minutes  # lets the screen mark it as an estimate
+                    sets = item["set_amounts"]
             if not isinstance(sets, list) or len(sets) == 0:
                 continue
             

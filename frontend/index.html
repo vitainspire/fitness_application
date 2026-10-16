@@ -884,6 +884,20 @@
 </section>
 
 <!-- ════════ REVOKE / DELETE PLAN CONFIRMATION MODAL ════════ -->
+<!-- In-app replacement for the browser's confirm() box; opened by appConfirm() in main.js.
+     Above every other popup (z-[300]) so it can be asked from inside any of them. -->
+<div id="app-confirm-modal" class="fixed inset-0 z-[300] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeAppConfirm(false)" role="dialog" aria-modal="true" aria-labelledby="app-confirm-msg">
+  <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
+    <h3 id="app-confirm-title" class="hidden font-headline-sm text-headline-sm text-on-surface font-bold"></h3>
+    <p id="app-confirm-msg" class="font-body-md text-body-md text-on-surface whitespace-pre-line"></p>
+    <div class="flex items-center justify-end gap-sm mt-sm">
+      <button type="button" id="app-confirm-cancel" onclick="closeAppConfirm(false)" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">Cancel</button>
+      <button type="button" id="app-confirm-ok" onclick="closeAppConfirm(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-sm hover:opacity-95 active:scale-95 transition-all">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="revoke-rel-modal" class="fixed inset-0 z-[120] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
      onclick="if (event.target === this) closeRevokeModal()">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
@@ -948,7 +962,7 @@
      onclick="if (event.target === this) closeManagedAddModal()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
-      <h3 class="font-headline-sm text-headline-sm text-on-surface">Add to their plan</h3>
+      <h3 id="ma-title" class="font-headline-sm text-headline-sm text-on-surface">Add to their plan</h3>
       <button onclick="closeManagedAddModal()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
         <span class="material-symbols-outlined">close</span>
       </button>
@@ -968,11 +982,18 @@
           <input id="ma-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
         </div>
       </div>
-      <label class="flex items-center justify-between py-xs">
+      <!-- Same "different amount for each set" option the self-service Add and
+           Edit screens have (pe-/ca- ids); shown only for reps/hold activities. -->
+      <label id="ma-per-set-toggle-wrap" class="hidden flex items-center justify-between py-xs">
+        <span id="ma-per-set-toggle-label" class="font-body-md text-on-surface">Different reps for each set</span>
+        <input id="ma-per-set-toggle" type="checkbox" onchange="toggleManagedPerSet()" class="w-5 h-5">
+      </label>
+      <div id="ma-per-set-inputs" class="hidden flex flex-col gap-xs"></div>
+      <label id="ma-auto-wrap" class="flex items-center justify-between py-xs">
         <span class="font-body-md text-on-surface">Let the app adjust this automatically</span>
         <input id="ma-auto" type="checkbox" checked class="w-5 h-5">
       </label>
-      <button onclick="submitManagedAdd()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Add</button>
+      <button id="ma-submit-btn" onclick="submitManagedAdd()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Add</button>
 
       <!-- Custom exercise: a fixed target, same as a built-in activity —
            never blocked by the safety grid, by design (the escape hatch for
@@ -1265,7 +1286,7 @@
           class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
       </div>
 
-      <div id="custom-type-wrap" class="hidden">
+      <div id="custom-type-wrap">
         <div>
           <label class="font-label-bold text-label-bold text-on-surface">How do you count it?</label>
           <div id="custom-type-chips" class="flex flex-wrap gap-xs mt-xs"></div>
@@ -1285,7 +1306,7 @@
       <p id="custom-err" class="hidden font-body-md text-on-error-container bg-error-container rounded px-sm py-xs"></p>
 
       <button id="custom-continue-btn" onclick="customContinue()" class="w-full bg-primary text-on-primary py-md rounded-full font-label-bold text-label-bold hover:opacity-90">
-        Continue
+        Save
       </button>
     </div>
   </div>

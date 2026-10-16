@@ -35,17 +35,14 @@ def test_implausible_walk_in_top_5_is_extraordinary_and_counts_for_streak(make_u
         assert bests["walk"][0]["value"] == 20.0
 
 
-def test_personal_best_list_keeps_only_top_5(make_user):
+def test_personal_best_list_has_exactly_one_best_per_exercise(make_user):
     user = make_user(condition_codes=["none"])
     with session_scope() as s:
         for amount in [16, 17, 18, 19, 20, 21]:  # all above the 15km plausible ceiling
             service.log_activity(s, user["user_id"], activity_type="walk", amount=amount, sets=1,
                                   client_entry_id=f"walk-{amount}")
         bests = service.list_personal_bests(s, user["user_id"])
-        values = [b["value"] for b in bests["walk"]]
-        assert len(values) == 5
-        assert sorted(values, reverse=True) == [21.0, 20.0, 19.0, 18.0, 17.0]  # 16 bumped out
-        assert 16.0 not in values
+        assert [b["value"] for b in bests["walk"]] == [21.0]  # one record, the best one
 
 
 def test_implausible_rep_based_log_is_never_extraordinary(make_user):
