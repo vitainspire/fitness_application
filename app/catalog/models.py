@@ -208,8 +208,19 @@ class SafetyGridCell(Base):
     # populate real ranks — found by actually running this locally.
     usefulness_rank: Mapped[int | None] = mapped_column(Integer)
 
+    # Separate from usefulness_rank above: "most useful to show" (relevance,
+    # covers every safe/modify cell) vs. this one, "actually helps reduce the
+    # condition itself" (efficacy, sparse — most activities don't meaningfully
+    # treat most conditions, so most cells leave this null on purpose; e.g.
+    # Wrist Circles is the ONLY ranked entry for carpal_tunnel). 1-5, 1 =
+    # most effective; null for `avoid` (same reasoning as usefulness_rank)
+    # and null for anything not genuinely therapeutic for this condition.
+    therapeutic_rank: Mapped[int | None] = mapped_column(Integer)
+
     __table_args__ = (
         CheckConstraint("verdict IN ('safe','modify','avoid')", name="sg_verdict_known"),
+        CheckConstraint("therapeutic_rank IS NULL OR therapeutic_rank BETWEEN 1 AND 5",
+                        name="sg_therapeutic_rank_range"),
         Index("ix_safety_grid_condition", "condition_code"),
     )
 

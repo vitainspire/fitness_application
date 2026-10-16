@@ -13,7 +13,7 @@ def test_overlong_email_raises_clean_validation_error(client):
     overlong_email = "a" * 310 + "@example.com"  # > 320 chars total
     r = client.post(
         "/v1/auth/signup",
-        json={"email": overlong_email, "password": "a-good-long-passphrase-123"},
+        json={"email": overlong_email, "password": "A-good-long-passphrase-123"},
         headers={"X-Device-Id": "pytest-device-overlong-email"},
     )
     assert r.status_code == 422, r.get_json()
@@ -24,7 +24,7 @@ def test_overlong_device_id_raises_clean_validation_error(client):
     overlong_device_id = "d" * 200  # > 128 chars
     r = client.post(
         "/v1/auth/signup",
-        json={"email": "pytest.overlong.device@example.com", "password": "a-good-long-passphrase-123"},
+        json={"email": "pytest.overlong.device@example.com", "password": "A-good-long-passphrase-123"},
         headers={"X-Device-Id": overlong_device_id},
     )
     assert r.status_code == 422, r.get_json()

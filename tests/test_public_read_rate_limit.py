@@ -57,7 +57,7 @@ def test_public_read_rate_limit_does_not_share_bucket_with_signup(app, client, m
     r = client.post(
         "/v1/auth/signup",
         json={"email": f"pytest.ratelimit.{uuid.uuid4().hex[:8]}@example.com",
-              "password": "a-good-long-passphrase-123"},
+              "password": "A-good-long-passphrase-123"},
         headers=headers,
     )
     assert r.status_code == 201, r.get_json()

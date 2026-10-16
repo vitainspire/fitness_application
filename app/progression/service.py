@@ -866,6 +866,7 @@ def run_weekly_progression(session: Session, user_id: str, *,
             # manager wants growth). Defaults True, so this changes nothing
             # for any entry that existed before this feature.
             UserProgram.auto_progress.is_(True),
+            UserProgram.soreness_reduced_since.is_(None),  # soreness hold overrides auto_progress too
         ).with_for_update()
     ).all()
 
@@ -1035,6 +1036,7 @@ def progression_series(session: Session, user_id: str, *,
     for activity_type, history in by_activity.items():
         taxonomy = session.get(ActivityTaxonomy, activity_type)
         display_name = taxonomy.display_name if taxonomy else activity_type
+        unit = taxonomy.amount_unit if taxonomy else ""
         points = [
             {
                 "applied_at": h.applied_at.isoformat(),
@@ -1043,11 +1045,15 @@ def progression_series(session: Session, user_id: str, *,
                 "old_target": float(h.old_target),
                 "new_target": float(h.new_target),
                 "reason": h.reason,
+                "unit": unit,
             }
             for h in history[-weeks:]
         ]
         series.append({
-            "activity_type": activity_type, "display_name": display_name, "points": points,
+            "activity_type": activity_type,
+            "display_name": display_name,
+            "unit": unit,
+            "points": points,
         })
     return sorted(series, key=lambda s: s["display_name"])
 
@@ -1173,3 +1179,44 @@ def apply_escalation(session: Session, user_id: str, activity_type: str,
     session.add(row)
     session.flush()
     return row
+
+
+def run_daily_progression_batch(*, today: date | None = None) -> dict:
+    """Executes daily progression calculation for all active users whose signup
+    weekday matches today's weekday (evaluating every user once every 7 days).
+    Runs each user in their own isolated transaction.
+    """
+    from app.auth.models import User
+    from app.platform.db import session_scope
+
+    today = today or today_ist()
+    with session_scope() as session:
+        rows = session.execute(
+            select(UserProgram.user_id, User.created_at)
+            .join(User, User.id == UserProgram.user_id)
+            .where(UserProgram.status == "active")
+            .distinct()
+        ).all()
+        due_user_ids = [
+            user_id for user_id, created_at in rows
+            if created_at.date().weekday() == today.weekday()
+        ]
+
+    total_users, total_adjustments, failed_users = 0, 0, 0
+    for user_id in due_user_ids:
+        try:
+            with session_scope() as session:
+                adjustments = run_weekly_progression(session, user_id, today=today)
+            total_users += 1
+            total_adjustments += len(adjustments)
+        except Exception:
+            failed_users += 1
+            _log.exception("Weekly progression failed for user_id=%s — skipped, other users unaffected.", user_id)
+
+    return {
+        "today": today.isoformat(),
+        "total_users": total_users,
+        "total_adjustments": total_adjustments,
+        "failed_users": failed_users,
+    }
+

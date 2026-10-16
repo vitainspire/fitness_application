@@ -59,7 +59,7 @@ def test_set_amounts_rejects_custom_exercise(make_user, client):
     user = make_user()
     custom = client.post(
         "/v1/custom-exercises",
-        json={"name": "Band Pull Apart", "measurement_types": ["reps"]},
+        json={"name": "Band Pull Apart", "measurement_type": "reps", "target_amount": 10},
         headers=user["headers"],
     ).get_json()
     r = client.post(

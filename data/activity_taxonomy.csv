@@ -1,13 +1,13 @@
 activity_type,display_name,prescription_type,default_sets,default_amount,amount_unit,rest_seconds,per_side,progression_axis,progression_step,max_sets,max_amount,plausible_max_total,est_pace_min_per_km,synonyms,source_exercise_id,priority_order,reviewer,reviewed_at
-walk,Walking,distance,1,1.0,km,0,FALSE,amount,0.2,1,5.0,15,12,walk|walking|went for a walk|walked|stroll,,1,product-team (not clinically reviewed),2026-08-13
-glute_bridge,Glute Bridge,reps,2,5,count,30,FALSE,amount,2,3,15,500,,glute bridge|bridge|bridges|hip bridge|butt lift,Butt_Lift_Bridge,2,product-team (not clinically reviewed),2026-08-13
-dead_bug,Dead Bug,reps,2,4,count,30,FALSE,amount,2,3,12,500,,dead bug|dead bugs|deadbug,Dead_Bug,3,product-team (not clinically reviewed),2026-08-13
-shoulder_circles,Shoulder Circles,reps,2,5,count,20,FALSE,amount,2,3,15,500,,shoulder circles|shoulder rolls|rolled my shoulders|shoulder roll,Shoulder_Circles,4,product-team (not clinically reviewed),2026-08-13
-running,Running,distance,1,1.0,km,0,FALSE,amount,0.25,1,5.0,15,7,run|running|jog|jogging|went for a run|ran,,5,product-team (not clinically reviewed),2026-08-13
-ankle_circles,Ankle Circles,reps,2,5,count,15,TRUE,amount,2,2,15,500,,ankle circles|ankle rotations|ankle circle|rotated my ankle,Ankle_Circles,6,product-team (not clinically reviewed),2026-08-13
-wrist_circles,Wrist Circles,reps,2,5,count,15,TRUE,amount,2,2,15,500,,wrist circles|wrist rotations|wrist circle|wrists,Wrist_Circles,7,product-team (not clinically reviewed),2026-08-13
-calf_stretch,Wall Calf Stretch,hold,2,10,sec,15,TRUE,amount,5,2,30,240,,calf stretch|calves|wall stretch|calf,Calf_Stretch_Hands_Against_Wall,8,product-team (not clinically reviewed),2026-08-13
-hamstring_stretch,Seated Hamstring Stretch,hold,2,15,sec,15,TRUE,amount,5,2,30,240,,hamstring stretch|hamstrings|seated hamstring|leg stretch,Seated_Floor_Hamstring_Stretch,9,product-team (not clinically reviewed),2026-08-13
-quad_stretch,Side-Lying Thigh Stretch,hold,2,15,sec,15,TRUE,amount,5,2,30,240,,quad stretch|thigh stretch|quads|quadriceps stretch,On_Your_Side_Quad_Stretch,10,product-team (not clinically reviewed),2026-08-13
-neck_isometric,Neck Hold,hold,2,5,sec,20,FALSE,amount,5,3,20,180,,neck hold|neck isometric|neck exercise|isometric neck,Isometric_Neck_Exercise_-_Front_And_Back,11,product-team (not clinically reviewed),2026-08-13
+walk,Walking,distance,1,1.0,km,0,FALSE,amount,0.2,1,5.0,15,12,walk|walking|went for a walk|walked|stroll,,7,product-team (not clinically reviewed),2026-08-13
+glute_bridge,Glute Bridge,reps,2,5,count,30,FALSE,amount,2,3,15,500,,glute bridge|bridge|bridges|hip bridge|butt lift,Butt_Lift_Bridge,6,product-team (not clinically reviewed),2026-08-13
+dead_bug,Dead Bug,reps,2,4,count,30,FALSE,amount,2,3,12,500,,dead bug|dead bugs|deadbug,Dead_Bug,5,product-team (not clinically reviewed),2026-08-13
+shoulder_circles,Shoulder Circles,reps,2,5,count,20,FALSE,amount,2,3,15,500,,shoulder circles|shoulder rolls|rolled my shoulders|shoulder roll,Shoulder_Circles,3,product-team (not clinically reviewed),2026-08-13
+running,Running,distance,1,1.0,km,0,FALSE,amount,0.25,1,5.0,15,7,run|running|jog|jogging|went for a run|ran,,8,product-team (not clinically reviewed),2026-08-13
+ankle_circles,Ankle Circles,reps,2,5,count,15,TRUE,amount,2,2,15,500,,ankle circles|ankle rotations|ankle circle|rotated my ankle,Ankle_Circles,1,product-team (not clinically reviewed),2026-08-13
+wrist_circles,Wrist Circles,reps,2,5,count,15,TRUE,amount,2,2,15,500,,wrist circles|wrist rotations|wrist circle|wrists,Wrist_Circles,2,product-team (not clinically reviewed),2026-08-13
+calf_stretch,Wall Calf Stretch,hold,2,10,sec,15,TRUE,amount,5,2,30,240,,calf stretch|calves|wall stretch|calf,Calf_Stretch_Hands_Against_Wall,9,product-team (not clinically reviewed),2026-08-13
+hamstring_stretch,Seated Hamstring Stretch,hold,2,15,sec,15,TRUE,amount,5,2,30,240,,hamstring stretch|hamstrings|seated hamstring|leg stretch,Seated_Floor_Hamstring_Stretch,10,product-team (not clinically reviewed),2026-08-13
+quad_stretch,Side-Lying Thigh Stretch,hold,2,15,sec,15,TRUE,amount,5,2,30,240,,quad stretch|thigh stretch|quads|quadriceps stretch,On_Your_Side_Quad_Stretch,11,product-team (not clinically reviewed),2026-08-13
+neck_isometric,Neck Hold,hold,2,5,sec,20,FALSE,amount,5,3,20,180,,neck hold|neck isometric|neck exercise|isometric neck,Isometric_Neck_Exercise_-_Front_And_Back,4,product-team (not clinically reviewed),2026-08-13
 lower_back_side_stretch,Seated Side Stretch,hold,2,10,sec,15,TRUE,amount,5,2,30,240,,side stretch|chair stretch|lower back stretch|seated side bend,Chair_Lower_Back_Stretch,12,product-team (not clinically reviewed),2026-08-13

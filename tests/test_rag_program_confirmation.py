@@ -78,10 +78,11 @@ def test_re_confirming_a_previously_hidden_exercise_restores_it_not_a_duplicate(
     assert active == {"walk", "glute_bridge"}
 
 
-def test_a_user_override_entry_is_never_auto_hidden(make_user):
+def test_a_user_override_entry_is_never_auto_hidden(make_user, force_avoid_cell):
     """Same protection build_program already gives a deliberate, informed
     user choice — a sport-focus confirmation must not silently reverse it."""
-    user = make_user(condition_codes=["herniated_disk"])  # avoid-verdicts hamstring_stretch
+    force_avoid_cell("herniated_disk", "hamstring_stretch")
+    user = make_user(condition_codes=["herniated_disk"])  # forced avoid-verdict hamstring_stretch
     with session_scope() as s:
         r = profile_service.add_program_entry(s, user["user_id"], "hamstring_stretch")
         assert r["needs_confirmation"] is True

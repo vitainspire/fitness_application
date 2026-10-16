@@ -12,7 +12,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,7 +26,7 @@ from app.auth.passwords import (
 )
 from app.platform import redis_clients as rc
 from app.platform.config import Config
-from app.platform.errors import Conflict, RateLimited, Unauthorized, ValidationError
+from app.platform.errors import Conflict, Forbidden, RateLimited, Unauthorized, ValidationError
 from app.profile.models import OverrideConsent
 
 # Deliberately vague and identical for both branches (1.9).
@@ -372,30 +372,106 @@ def change_password(session: Session, cfg: Config, user_id: str, *,
 
 # --- Account deletion ------------------------------------------------------
 
+def _purge_user_data(session: Session, user_id: str) -> None:
+    """Permanently deletes all health data, logs, chat history, programs, and
+    tokens for the user across all modules (GDPR / Right to be Forgotten)."""
+    # 1. Managed relationships and pending plans
+    from app.relationships.models import (
+        ManagedRelationship, PendingCustomExercise, PendingManagedEntry,
+    )
+    rel_ids = session.scalars(
+        select(ManagedRelationship.id).where(
+            or_(ManagedRelationship.manager_user_id == user_id,
+                ManagedRelationship.managed_user_id == user_id)
+        )
+    ).all()
+    if rel_ids:
+        session.execute(
+            delete(PendingManagedEntry).where(PendingManagedEntry.relationship_id.in_(rel_ids))
+        )
+        session.execute(
+            delete(PendingCustomExercise).where(PendingCustomExercise.relationship_id.in_(rel_ids))
+        )
+        session.execute(
+            delete(ManagedRelationship).where(ManagedRelationship.id.in_(rel_ids))
+        )
+
+    # 2. RAG health assistant conversations, memories, and quotas
+    from app.rag.models import RehabChatLog, RehabMemory, RehabQuota
+    session.execute(delete(RehabChatLog).where(RehabChatLog.user_id == user_id))
+    session.execute(delete(RehabMemory).where(RehabMemory.user_id == user_id))
+    session.execute(delete(RehabQuota).where(RehabQuota.user_id == user_id))
+
+    # 3. Progression history
+    from app.progression.models import ProgressionHistory
+    session.execute(delete(ProgressionHistory).where(ProgressionHistory.user_id == user_id))
+
+    # 4. Profile, conditions, exercise programs, activity logs, personal bests, and workout sessions
+    from app.profile.models import (
+        ActivityLog, CustomExercise, PersonalBest, SorenessReport,
+        UserCondition, UserProfile, UserProgram, WaterIntakeLog, WorkoutSession,
+    )
+    session.execute(delete(ActivityLog).where(ActivityLog.user_id == user_id))
+    session.execute(delete(WorkoutSession).where(WorkoutSession.user_id == user_id))
+    session.execute(delete(SorenessReport).where(SorenessReport.user_id == user_id))
+    session.execute(delete(WaterIntakeLog).where(WaterIntakeLog.user_id == user_id))
+    session.execute(delete(PersonalBest).where(PersonalBest.user_id == user_id))
+    session.execute(delete(UserProgram).where(UserProgram.user_id == user_id))
+    session.execute(delete(CustomExercise).where(CustomExercise.user_id == user_id))
+    session.execute(delete(UserCondition).where(UserCondition.user_id == user_id))
+    session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
+
+    # 5. Auth tokens
+    session.execute(delete(RefreshToken).where(RefreshToken.user_id == user_id))
+    session.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id))
+    session.execute(delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user_id))
+    session.execute(delete(DevicePushToken).where(DevicePushToken.user_id == user_id))
+
+
 def delete_account(session: Session, cfg: Config, user_id: str, *, password: str,
                    pitr_days: int = 35) -> None:
-    """1.10 — soft delete now, and leave a record that survives a restore.
+    """1.10 — permanently purge user health data and release the email address.
 
     Found live (third-pass code audit): the single most destructive action in
     this whole module used to require only a valid session (@require_auth) —
     change_password already re-checks the current password before proceeding;
     this did not. Now mirrors that same re-authentication step, so a
     hijacked/leaked access token alone isn't enough to permanently delete the
-    account — the caller must prove they still know the password too."""
+    account — the caller must prove they still know the password too.
+
+    Explicit managed-account block (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md):
+    confirmed directly — only whoever created the link should be able to
+    delete it, never the managed person themselves. In practice the password
+    check above already stops this today (a managed account's password is a
+    random, never-revealed secret — see open_invite), but that's an
+    accident of implementation, not a guarantee; this makes the real rule
+    explicit so it keeps holding even if a managed account's password can
+    ever legitimately be set later (e.g. a future "claim this account for
+    real" reset flow).
+    """
+    from app.relationships.service import is_managed_account  # local: avoids
+    # a module-level import cycle risk — app.relationships.service imports
+    # app.auth.tokens/.models/.passwords (not .service), so this direction is
+    # safe, but keeping it local matches this codebase's existing convention
+    # for every other cross-module import of this shape.
+
     user = session.get(User, user_id)
     if user is None or not user.is_active:
         return
+    if is_managed_account(session, user_id):
+        raise Forbidden(
+            "This account is managed by someone else — only they can delete it."
+        )
     if not verify_password(user.password_hash, password):
         raise ValidationError("Password is incorrect.")
 
     now = tk.now_utc()
     user.deleted_at = now
+    # Free the unique email constraint so the user can re-register anytime with their original email
+    user.email = f"deleted_{user.id}_{int(now.timestamp())}@deleted.invalid"
 
     tk.revoke_all_refresh_tokens(session, user_id)
     tk.set_tokens_valid_after(user_id, cfg)
-    session.query(DevicePushToken).filter(
-        DevicePushToken.user_id == user_id
-    ).delete(synchronize_session=False)
 
     # 14.7 — keep the override-consent evidence, strip the identity attached
     # to it. Proof the warning system worked; no health data tied to a person
@@ -404,8 +480,12 @@ def delete_account(session: Session, cfg: Config, user_id: str, *, password: str
         OverrideConsent.user_id == user_id
     ).update({OverrideConsent.user_id: None}, synchronize_session=False)
 
+    # Permanently delete all health conditions, conversation logs, workout sessions,
+    # activity logs, personal bests, programs, and tokens right now.
+    _purge_user_data(session, user_id)
+
     session.add(DeletionRequest(
         user_id_hash=_hash_user_id(user_id),
         completed_at=now,
-        purge_after=now + timedelta(days=pitr_days),
+        purge_after=now,
     ))

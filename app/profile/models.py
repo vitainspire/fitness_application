@@ -19,7 +19,15 @@ def _uuid() -> str:
 
 
 class UserProfile(Base):
-    """3.1 — age (18+), goal, experience band, unit preference."""
+    """3.1 — age, goal, experience band, unit preference.
+
+    No adults-only floor: explicitly reversed (not a bug fix) to support
+    managed plans (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md), where a
+    parent/doctor/teacher creates a real account for a child/patient/student
+    of any age. The original 18+ rule (and why it existed — minors bringing
+    parental-consent/different-guidance obligations) is preserved in the
+    migration that removed it (e1f2a3b4c5d6) for anyone revisiting this.
+    """
     __tablename__ = "user_profiles"
 
     user_id: Mapped[str] = mapped_column(
@@ -32,9 +40,7 @@ class UserProfile(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
-        # 18+ only. Accepting minors brings parental consent and different
-        # guidance entirely — out of scope.
-        CheckConstraint("age >= 18", name="prof_adults_only"),
+        CheckConstraint("age >= 1", name="prof_age_sane"),  # sanity floor only, not a legal gate
         CheckConstraint(
             "experience_band IN ('beginner','1m','2m','3m','experienced')",
             name="prof_band_known"),
@@ -57,9 +63,15 @@ class UserCondition(Base):
 class CustomExercise(Base):
     """4.4 — a user's own free-named exercise.
 
-    Personal (owned by exactly one user), tracking-only: never suggested,
-    never programmed (13.1). Exists purely so activity_logs has something
-    to point at when a user logs something outside the reviewed taxonomy.
+    Personal (owned by exactly one user). Behaves like a real prescribed
+    exercise, not just a tracking label: created with ONE measurement type
+    and a fixed target (sets x reps, a distance, or a duration), the same
+    shape as a built-in taxonomy activity's own default_sets/default_amount —
+    changed from the original multi-type, no-target "log whatever you did"
+    design (see git history) once that mismatch with how the rest of the app
+    prescribes exercises became worth closing. Still never suggested and
+    never auto-progressed (13.1): the target is a fixed prescription the
+    creator set, not something this app adjusts on its own.
     """
     __tablename__ = "custom_exercises"
 
@@ -69,12 +81,16 @@ class CustomExercise(Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     # Lowercased/trimmed, so "Swimming" and "swimming " collide as one entry.
     normalized_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 1 to 3 of 'reps'/'distance'/'duration' — a user can track an exercise by
-    # more than one measure at once (e.g. Swimming by both Distance and Time).
-    # unit and plausible_max_total aren't stored: both are fixed per type (see
-    # CUSTOM_MEASUREMENT_UNITS / CUSTOM_MEASUREMENT_DEFAULT_MAX in service.py),
-    # so keeping a copy on the row would just be a second place to drift.
-    measurement_types: Mapped[list[str]] = mapped_column(ARRAY(String(16)), nullable=False)
+    # One of 'reps'/'distance'/'duration'. unit and plausible_max_total
+    # aren't stored: both are fixed per type (see CUSTOM_MEASUREMENT_UNITS /
+    # CUSTOM_MEASUREMENT_DEFAULT_MAX in service.py), so keeping a copy on the
+    # row would just be a second place to drift.
+    measurement_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Only meaningful (and only ever shown) for measurement_type == 'reps' —
+    # distance/duration are a single effort, always 1, same convention
+    # ActivityTaxonomy and PendingManagedEntry already use.
+    target_sets: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    target_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
     # Soft delete (mirrors User.deleted_at): the row stays so past logs that
@@ -89,9 +105,10 @@ class CustomExercise(Base):
         # reuse once its old row is soft-deleted, and the service layer
         # already enforces "no two ACTIVE exercises share a name" itself.
         CheckConstraint(
-            "measurement_types <@ ARRAY['reps','distance','duration']::varchar[] "
-            "AND array_length(measurement_types, 1) BETWEEN 1 AND 3",
+            "measurement_type IN ('reps','distance','duration')",
             name="custom_measurement_known"),
+        CheckConstraint("target_amount > 0", name="custom_target_amount_positive"),
+        CheckConstraint("target_sets >= 1", name="custom_target_sets_positive"),
     )
 
 
@@ -170,13 +187,33 @@ class ActivityLog(Base):
         UniqueConstraint("user_id", "client_entry_id", name="uq_log_client_entry"),
         Index("ix_activity_logs_user_date", "user_id", "local_date"),
         Index("ix_activity_logs_workout_session", "workout_session_id"),
-        CheckConstraint("source IN ('manual','voice')", name="log_source_known"),
+        CheckConstraint("source IN ('manual','voice','gps')", name="log_source_known"),
         CheckConstraint("amount_per_set > 0", name="log_amount_positive"),
         CheckConstraint("sets_done >= 1", name="log_sets_positive"),
         CheckConstraint("num_nonnulls(activity_type, custom_exercise_id) = 1",
                         name="log_exactly_one_source"),
         CheckConstraint("NOT extraordinary OR implausible",
                         name="log_extraordinary_implies_implausible"),
+    )
+
+
+class SorenessReport(Base):
+    """One explicit 'that felt sore' report against a taxonomy activity.
+    Pure event log — read by _soreness_trigger_met below to decide whether
+    to instantly reduce that activity's target; never edited after insert."""
+    __tablename__ = "soreness_reports"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    activity_type: Mapped[str] = mapped_column(
+        String(64), ForeignKey("activity_taxonomy.activity_type", ondelete="CASCADE"),
+        nullable=False)
+    reported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_soreness_reports_user_activity", "user_id", "activity_type", "reported_at"),
     )
 
 
@@ -240,6 +277,16 @@ class UserProgram(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="template")
     suspended_reason: Mapped[str | None] = mapped_column(String(256))
+    # Soreness-reduction (separate concept from suspended_reason/status above —
+    # a soreness-reduced entry stays status="active" and fully visible, just at
+    # a lower target, unlike a true suspension which hides the entry). NULL
+    # means "not currently reduced." When both are set, target_amount (and
+    # internal_target_amount, if it was already in use) have been lowered from
+    # whatever is snapshotted here, and run_weekly_progression must skip this
+    # entry entirely until it's restored (see that function's own filter).
+    soreness_reduced_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pre_soreness_target_amount: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    pre_soreness_internal_target_amount: Mapped[float | None] = mapped_column(Numeric(12, 6))
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -290,6 +337,22 @@ class UserProgram(Base):
         CheckConstraint("target_sets >= 1", name="prog_sets_positive"),
         CheckConstraint("reps_ceiling IS NULL OR reps_ceiling > 0",
                         name="prog_reps_ceiling_positive"),
+    )
+
+
+class WaterIntakeLog(Base):
+    """One row per user per IST day — glasses_count increments each tap,
+    never a separate row per tap (keeps this table tiny and the 'today's
+    total' query a single row lookup, not a SUM)."""
+    __tablename__ = "water_intake_logs"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    local_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    glasses_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        CheckConstraint("glasses_count >= 0", name="water_glasses_nonneg"),
     )
 
 
@@ -382,3 +445,4 @@ class WorkoutSession(Base):
         Index("ix_workout_sessions_one_active", "user_id", unique=True,
               postgresql_where=text("status = 'active'")),
     )
+

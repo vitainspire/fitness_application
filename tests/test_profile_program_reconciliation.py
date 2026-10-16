@@ -32,7 +32,8 @@ def _onboard(session, user_id, condition_codes):
     )
 
 
-def test_removing_the_blocking_condition_resurrects_the_entry_with_its_progress(make_user):
+def test_removing_the_blocking_condition_resurrects_the_entry_with_its_progress(make_user, force_avoid_cell):
+    force_avoid_cell("herniated_disk", ACTIVITY)
     user = make_user(condition_codes=["none"])
     with session_scope() as s:
         apply_escalation(s, user["user_id"], ACTIVITY, 5.0)

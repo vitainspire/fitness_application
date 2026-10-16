@@ -63,7 +63,7 @@ def test_refresh_rotation_still_works_normally_with_the_row_lock(make_user):
     import uuid
     unique = uuid.uuid4().hex[:8]
     with session_scope() as s:
-        u = User(email=f"rotate.{unique}@example.com", password_hash=hash_password("a-good-long-passphrase-123"))
+        u = User(email=f"rotate.{unique}@example.com", password_hash=hash_password("A-good-long-passphrase-123"))
         s.add(u)
         s.flush()
         cfg = _cfg()
@@ -101,9 +101,9 @@ def test_logout_does_not_revoke_another_users_refresh_token():
     unique = uuid.uuid4().hex[:8]
     with session_scope() as s:
         victim = User(email=f"victim.{unique}@example.com",
-                      password_hash=hash_password("a-good-long-passphrase-123"))
+                      password_hash=hash_password("A-good-long-passphrase-123"))
         attacker = User(email=f"attacker.{unique}@example.com",
-                        password_hash=hash_password("a-good-long-passphrase-123"))
+                        password_hash=hash_password("A-good-long-passphrase-123"))
         s.add_all([victim, attacker])
         s.flush()
         victim_id, attacker_id = victim.id, attacker.id
@@ -142,8 +142,48 @@ def test_delete_account_succeeds_with_the_correct_password(make_user):
     user = make_user()
     cfg = _cfg()
     with session_scope() as s:
-        service.delete_account(s, cfg, user["user_id"], password="a-good-long-passphrase-123")
+        service.delete_account(s, cfg, user["user_id"], password="A-good-long-passphrase-123")
 
     with session_scope() as s:
         u = s.get(User, user["user_id"])
         assert u.deleted_at is not None
+
+
+def test_delete_account_purges_data_and_frees_email_for_reregistration(make_user, client):
+    from app.profile.models import UserCondition, UserProfile
+
+    # 1. User signs up with specific email and conditions
+    user = make_user(condition_codes=["chronic_back_pain"])
+    user_id = user["user_id"]
+    cfg = _cfg()
+
+    with session_scope() as s:
+        u = s.get(User, user_id)
+        email = u.email
+
+    # 2. Confirm profile and conditions exist
+    with session_scope() as s:
+        assert s.get(UserProfile, user_id) is not None
+        assert s.get(UserCondition, (user_id, "chronic_back_pain")) is not None
+
+    # 3. User deletes account
+    with session_scope() as s:
+        service.delete_account(s, cfg, user_id, password="A-good-long-passphrase-123")
+
+    # 4. Verify all profile and health data are permanently purged
+    with session_scope() as s:
+        assert s.get(UserProfile, user_id) is None
+        assert s.get(UserCondition, (user_id, "chronic_back_pain")) is None
+
+    # 5. User signs up again with the EXACT SAME EMAIL address (no 409 Conflict)
+    r = client.post(
+        "/v1/auth/signup",
+        json={"email": email, "password": "New-passphrase-12345"},
+        headers={"X-Device-Id": "device-new-signup"},
+    )
+    assert r.status_code == 201
+    new_user_data = r.get_json()
+    assert new_user_data["user_id"] != user_id
+    with session_scope() as s:
+        new_u = s.get(User, new_user_data["user_id"])
+        assert new_u.email == email

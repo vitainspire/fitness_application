@@ -84,15 +84,50 @@ def is_breached(plain: str, *, timeout: float = 2.0) -> bool:
     return any(line.split(":")[0] == suffix for line in resp.text.splitlines())
 
 
-def validate_password(plain: str, *, min_length: int, breach_check: bool) -> None:
-    if len(plain) < min_length:
-        raise ValidationError(
-            f"Password must be at least {min_length} characters."
-        )
+def check_password_complexity(plain: str, min_length: int = 10) -> dict[str, bool]:
+    """Inspects password composition and returns compliance breakdown."""
+    return {
+        "min_length": len(plain) >= min_length,
+        "has_upper": any(c.isupper() for c in plain),
+        "has_lower": any(c.islower() for c in plain),
+        "has_digit": any(c.isdigit() for c in plain),
+        "has_special": any(not c.isalnum() for c in plain),
+        "not_overlong": len(plain) <= MAX_PASSWORD_LENGTH,
+    }
+
+
+def validate_password(
+    plain: str,
+    *,
+    min_length: int = 10,
+    breach_check: bool = True,
+    enforce_complexity: bool = True,
+) -> None:
     if len(plain) > MAX_PASSWORD_LENGTH:
         raise ValidationError(
             f"Password must be no more than {MAX_PASSWORD_LENGTH} characters."
         )
+    if len(plain) < min_length:
+        raise ValidationError(
+            f"Password must be at least {min_length} characters."
+        )
+    if enforce_complexity:
+        if not any(c.isupper() for c in plain):
+            raise ValidationError(
+                "Password must contain at least one uppercase letter (A-Z)."
+            )
+        if not any(c.islower() for c in plain):
+            raise ValidationError(
+                "Password must contain at least one lowercase letter (a-z)."
+            )
+        if not any(c.isdigit() for c in plain):
+            raise ValidationError(
+                "Password must contain at least one number (0-9)."
+            )
+        if not any(not c.isalnum() for c in plain):
+            raise ValidationError(
+                "Password must contain at least one special character (!@#$%^&*...)."
+            )
     if breach_check and is_breached(plain):
         raise ValidationError(
             "This password has appeared in a known data breach. Please choose another."

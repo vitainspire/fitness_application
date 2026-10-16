@@ -32,6 +32,43 @@ def app():
 
 
 @pytest.fixture
+def force_avoid_cell(app):
+    """Temporarily force one (condition_code, activity_type) safety_grid cell
+    to verdict='avoid', for a test that needs a real avoid-verdict example to
+    exercise the override/confirmation path — independent of whatever the
+    actually-reviewed grid currently says for that pair (which can change,
+    as it did when herniated_disk x hamstring_stretch was corrected from
+    avoid to modify after an external-source review).
+
+    Tests run against the real local dev DB with no transactional rollback
+    (see this file's own docstring), so this restores the REAL grid from
+    data/safety_grid.csv afterward via the same loader the app itself uses —
+    never leaves a fake 'avoid' sitting in dev data for the next test or a
+    manual poke at the running app.
+    """
+    from app.platform.db import session_scope
+    from app.catalog.models import SafetyGridCell
+
+    used = False
+
+    def _force(condition_code: str, activity_type: str) -> None:
+        nonlocal used
+        used = True
+        with session_scope() as s:
+            cell = s.get(SafetyGridCell, (condition_code, activity_type))
+            cell.verdict = "avoid"
+            cell.usefulness_rank = None
+            cell.therapeutic_rank = None
+
+    yield _force
+
+    if used:
+        from app.catalog.loader import load_safety_grid
+        with app.app_context(), session_scope() as s:
+            load_safety_grid(s)
+
+
+@pytest.fixture
 def client(app):
     return app.test_client()
 
@@ -48,10 +85,13 @@ def make_user(client):
         # collide regardless of timing.
         unique = uuid.uuid4().hex[:12]
         email = f"pytest.{unique}@example.com"
-        device_headers = {"X-Device-Id": f"pytest-device-{unique}"}
+        device_headers = {
+            "X-Device-Id": f"pytest-device-{unique}",
+            "X-Forwarded-For": f"10.{int(unique[:2], 16)}.{int(unique[2:4], 16)}.{int(unique[4:6], 16)}",
+        }
         r = client.post(
             "/v1/auth/signup",
-            json={"email": email, "password": "a-good-long-passphrase-123"},
+            json={"email": email, "password": "A-good-long-passphrase-123"},
             headers=device_headers,
         )
         assert r.status_code == 201, r.get_json()

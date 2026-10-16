@@ -7,7 +7,9 @@ no suggestions rather than unfiltered ones.
 from __future__ import annotations
 
 import itertools
+import json
 import math
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -21,11 +23,12 @@ from app.catalog.models import (
 )
 from app.platform.errors import Conflict, Forbidden, NotFound, ValidationError
 from app.profile.models import (
-    ActivityLog, CustomExercise, OverrideConsent, PersonalBest, UserCondition, UserProfile,
-    UserProgram, WorkoutSession,
+    ActivityLog, CustomExercise, OverrideConsent, PersonalBest, SorenessReport,
+    UserCondition, UserProfile, UserProgram, WaterIntakeLog, WorkoutSession,
 )
+from app.progression.models import ProgressionHistory
 from app.relationships.models import ManagedRelationship
-from app.relationships.service import require_active_relationship
+from app.relationships.service import is_managed_account, require_active_relationship
 
 IST = timezone(timedelta(hours=5, minutes=30))  # single market (3.3)
 
@@ -71,7 +74,7 @@ MAX_TOTAL_VOLUME = 99_999_999
 # Mirrors ActivityLog's own CheckConstraint("source IN ('manual','voice')").
 # Kept here so an unknown value is a clean 422 at the service boundary rather
 # than an IntegrityError from the database.
-LOG_SOURCES = {"manual", "voice"}
+LOG_SOURCES = {"manual", "voice", "gps"}
 
 # A flagged-implausible log for a distance/duration activity (never a
 # reps/sets exercise — see log_activity) that ranks in the user's own top 5
@@ -133,9 +136,25 @@ def is_referred(session: Session, user_id: str) -> bool:
 
 def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
                         experience_band: str, condition_codes: list[str],
-                        unit_preference: str = "km") -> dict:
-    if not isinstance(age, int) or age < 18 or age > MAX_AGE:
-        raise ValidationError(f"Age must be a whole number between 18 and {MAX_AGE}.")
+                        unit_preference: str = "km",
+                        build_default_program: bool = True,
+                        min_age: int = 1) -> dict:
+    """build_default_program=False: managed plans
+    (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md) — a manager-curated plan
+    must consist of exactly what the manager staged, never also the generic
+    tier-based default program every other new account gets. Every existing
+    caller (the real /v1/profile/onboarding route, and the RAG chat's
+    condition-confirmation path) keeps today's behavior unchanged.
+
+    No 18+ floor: explicit product decision, confirmed directly ("remove age
+    ristriction from our plan any one can use ower application"), reversing
+    the original adults-only rule — see UserProfile's own docstring and
+    migration e1f2a3b4c5d6 for what that rule was and why it existed.
+    min_age is kept as a parameter (defaulting to a bare sanity floor, not a
+    legal gate) in case a future caller ever needs a different one.
+    """
+    if not isinstance(age, int) or age < min_age or age > MAX_AGE:
+        raise ValidationError(f"Age must be a whole number between {min_age} and {MAX_AGE}.")
     if goal not in GOALS:
         raise ValidationError(f"Goal must be one of: {', '.join(sorted(GOALS))}")
     if experience_band not in BANDS:
@@ -195,7 +214,7 @@ def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
         .where(UserProgram.user_id == user_id, UserProgram.suspended_reason == "referred")
         .values(status="active", suspended_reason=None)
     )
-    program = build_program(session, user_id)
+    program = build_program(session, user_id) if build_default_program else []
     return {"referred": False, "message": None, "program": program}
 
 
@@ -213,8 +232,11 @@ def update_profile(session: Session, user_id: str, *, fields: dict) -> dict:
 
     if "age" in fields:
         age = fields["age"]
-        if not isinstance(age, int) or age < 18 or age > MAX_AGE:
-            raise ValidationError(f"Age must be a whole number between 18 and {MAX_AGE}.")
+        # No 18+ floor — see UserProfile's own docstring and
+        # complete_onboarding's: this was a deliberate product reversal, not
+        # a bug fix.
+        if not isinstance(age, int) or age < 1 or age > MAX_AGE:
+            raise ValidationError(f"Age must be a whole number between 1 and {MAX_AGE}.")
         prof.age = age
 
     if "goal" in fields:
@@ -499,6 +521,7 @@ def get_program(session: Session, user_id: str, *, include_suspended: bool = Fal
             # keeps a data gap from ever hiding an activity outright).
             "usefulness_rank": ranks.get(p.activity_type, t.priority_order),
             "source": p.source,
+            "auto_progress": p.auto_progress,
         })
     return out
 
@@ -594,17 +617,26 @@ def list_catalogue(session: Session, user_id: str) -> list[dict]:
     taxonomy = session.scalars(
         select(ActivityTaxonomy).order_by(ActivityTaxonomy.priority_order)).all()
     taxonomy = sorted(taxonomy, key=lambda t: (ranks.get(t.activity_type, t.priority_order), t.priority_order))
+
+    from app.progression.service import _round_reps
+    from app.relationships.service import _EXPERIENCE_MULTIPLIER
+    prof = session.get(UserProfile, user_id)
+    multiplier = _EXPERIENCE_MULTIPLIER.get((prof.experience_band if prof else None) or "beginner", 1.0)
+
     out = []
     for t in taxonomy:
         if t.activity_type in visible:
             continue
         v = _worst_verdict(session, user_id, t.activity_type)
+        scaled = float(t.default_amount) * multiplier
+        scaled_amount = (_round_reps(scaled) if t.prescription_type in ("reps", "hold")
+                         else round(scaled, 1))
         out.append({
             "activity_type": t.activity_type,
             "display_name": t.display_name,
             "prescription_type": t.prescription_type,
-            "default_sets": t.default_sets,
-            "default_amount": float(t.default_amount),
+            "default_sets": 1 if t.prescription_type in ("distance", "duration") else t.default_sets,
+            "default_amount": scaled_amount,
             "amount_unit": t.amount_unit,
             "per_side": t.per_side,
             "verdict": v["verdict"] if v else "safe",
@@ -759,6 +791,93 @@ def set_managed_target(session: Session, manager_user_id: str, managed_user_id: 
     entry.target_sets = target_sets
     entry.target_amount = Decimal(str(target_amount))
     entry.internal_target_amount = Decimal(str(target_amount))
+    session.flush()
+    return {
+        "activity_type": activity_type, "target_sets": entry.target_sets,
+        "target_amount": float(entry.target_amount), "auto_progress": entry.auto_progress,
+    }
+
+
+def set_own_target(session: Session, user_id: str, activity_type: str,
+                   target_sets: int, target_amount: float,
+                   set_amounts: list[float] | None = None,
+                   auto_progress: bool | None = None) -> dict:
+    """Self-service equivalent of set_managed_target above — a user fixing
+    their own mistake (wrong default, or they just want a different number),
+    not a manager overriding someone else's. Same validation, no relationship
+    check since there's no manager/managed split here.
+
+    set_amounts (optional): a different target per individual set (e.g.
+    [12, 10, 8] for a 3-set pyramid), reps or hold activities only — this is
+    the same set_targets column app/progression/service.py's
+    start_per_set_tracking_if_needed seeds lazily from real logged
+    performance, just populated directly from what the user typed up front
+    instead of waiting for organic logging to diverge it from a uniform
+    start. When given, it replaces target_sets/target_amount entirely
+    (target_sets becomes its length, target_amount its average, matching
+    the column's own documented invariant). For reps, this also activates
+    the weekly per-set auto-progression engine (reps_ceiling). That engine's
+    growth math (ceilings, trailing averages) is reps-specific, so a hold
+    activity's breakdown stays fixed instead — auto_progress is forced off
+    rather than handed to an engine tuned for rep counts, not seconds.
+
+    auto_progress (optional): None leaves the entry's existing flag
+    untouched; applied before the set_amounts branch above, which can still
+    force it False afterward for a hold-type per-set breakdown."""
+    entry = session.get(UserProgram, (user_id, activity_type))
+    if entry is None:
+        raise NotFound(f"{activity_type} is not in your plan.")
+
+    t = session.get(ActivityTaxonomy, activity_type)
+    from app.progression.service import REPS_STANDARD_CEILING, _round_reps
+
+    if auto_progress is not None:
+        entry.auto_progress = auto_progress
+
+    if set_amounts is not None:
+        if t.prescription_type not in ("reps", "hold"):
+            raise ValidationError(f"{t.display_name} doesn't support a different amount per set.")
+        if len(set_amounts) < 1:
+            raise ValidationError("Provide at least one set.")
+        if any(round(v, 2) <= 0 for v in set_amounts):
+            raise ValidationError("Each set's amount must be greater than zero.")
+        is_reps = t.prescription_type == "reps"
+        rounded = [_round_reps(v) for v in set_amounts] if is_reps else [round(v, 2) for v in set_amounts]
+        entry.set_targets = [Decimal(str(v)) for v in rounded]
+        entry.internal_set_targets = [Decimal(str(v)) for v in rounded]
+        if is_reps:
+            entry.reps_ceiling = Decimal(str(REPS_STANDARD_CEILING))
+        else:
+            entry.auto_progress = False
+        entry.target_sets = len(rounded)
+        avg = _round_reps(sum(rounded) / len(rounded)) if is_reps else round(sum(rounded) / len(rounded), 2)
+        entry.target_amount = Decimal(str(avg))
+        entry.internal_target_amount = Decimal(str(avg))
+        session.flush()
+        return {
+            "activity_type": activity_type, "target_sets": entry.target_sets,
+            "target_amount": float(entry.target_amount),
+            "set_targets": [float(v) for v in entry.set_targets],
+            "auto_progress": entry.auto_progress,
+        }
+
+    if round(target_amount, 2) <= 0:
+        raise ValidationError("Amount must be greater than zero.")
+    if target_sets < 1:
+        raise ValidationError("Sets must be at least 1.")
+    if t.prescription_type in ("distance", "duration") and target_sets != 1:
+        raise ValidationError(f"{t.display_name} is a single effort, not sets.")
+    if t.prescription_type == "reps":
+        target_amount = _round_reps(target_amount)
+
+    entry.target_sets = target_sets
+    entry.target_amount = Decimal(str(target_amount))
+    entry.internal_target_amount = Decimal(str(target_amount))
+    # A fresh uniform target overrides any earlier per-set divergence -- the
+    # old per-set breakdown would otherwise keep showing stale numbers next
+    # to a brand-new blended target that no longer agrees with them.
+    entry.set_targets = None
+    entry.internal_set_targets = None
     session.flush()
     return {
         "activity_type": activity_type, "target_sets": entry.target_sets,
@@ -947,21 +1066,56 @@ def _save_personal_best(session: Session, user_id: str, activity_type: str, valu
 
 
 def list_personal_bests(session: Session, user_id: str) -> dict:
-    """Grouped by activity_type, each list ordered best-first. Purely a
-    celebratory display list — never consulted by streak, progression, or
-    adherence math."""
-    rows = session.scalars(
+    """Grouped by activity_type, each list ordered best-first. Returns the user's
+    top records (up to 5) for each activity. Purely a celebratory display list —
+    never consulted by streak, progression, or adherence math."""
+    tax_names = {t.activity_type: t.display_name for t in session.scalars(select(ActivityTaxonomy)).all()}
+    custom_names = {c.id: c.name for c in session.scalars(select(CustomExercise).where(CustomExercise.user_id == user_id)).all()}
+
+    pb_rows = session.scalars(
         select(PersonalBest)
         .where(PersonalBest.user_id == user_id)
         .order_by(PersonalBest.activity_type, PersonalBest.value.desc())
     ).all()
+
     out: dict[str, list[dict]] = {}
-    for r in rows:
+    for r in pb_rows:
         out.setdefault(r.activity_type, []).append({
-            "value": float(r.value), "unit": r.unit,
+            "value": float(r.value),
+            "sets": 1,
+            "unit": r.unit,
+            "total_volume": float(r.value),
             "achieved_at": r.achieved_at.isoformat(),
+            "display_name": tax_names.get(r.activity_type, r.activity_type),
         })
+
+    # For any activities with plausible logs not already in out from PersonalBest:
+    logs = session.scalars(
+        select(ActivityLog)
+        .where(
+            ActivityLog.user_id == user_id,
+            ActivityLog.implausible.is_(False),
+        )
+        .order_by(ActivityLog.amount_per_set.desc(), ActivityLog.logged_at.desc())
+    ).all()
+
+    for l in logs:
+        key = l.activity_type or l.custom_exercise_id
+        if not key or key in out:
+            continue
+        display_name = tax_names.get(l.activity_type) or custom_names.get(l.custom_exercise_id) or key
+        out[key] = [{
+            "value": float(l.amount_per_set),
+            "sets": l.sets_done,
+            "unit": l.unit,
+            "total_volume": float(l.total_volume),
+            "achieved_at": l.logged_at.isoformat(),
+            "display_name": display_name,
+        }]
+
     return out
+
+
 
 
 def log_activity(session: Session, user_id: str, *, activity_type: str | None = None,
@@ -1048,20 +1202,14 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
         custom = session.get(CustomExercise, custom_exercise_id)
         if custom is None or custom.user_id != user_id or custom.deleted_at is not None:
             raise NotFound(f"Unknown custom exercise: {custom_exercise_id}")
-        # unit->type is 1:1 (count/km/min never collide), so the unit on this
-        # log tells us which of the exercise's selected types it belongs to -
-        # no separate measurement-type field is needed on the log itself.
-        allowed = {CUSTOM_MEASUREMENT_UNITS[t]: t for t in custom.measurement_types}
-        if unit is None:
-            if len(allowed) != 1:
-                raise ValidationError(
-                    f"{custom.name} tracks more than one thing — specify unit: "
-                    f"{', '.join(sorted(allowed))}.")
-            unit = next(iter(allowed))
-        if unit not in allowed:
-            raise ValidationError(
-                f"{custom.name} is measured in {', '.join(sorted(allowed))}, not {unit}.")
-        measurement_type = allowed[unit]
+        # unit->type is 1:1 (count/km/min never collide) — a custom exercise
+        # has exactly one measurement_type now, so the log's unit just has to
+        # match it, never pick between several the way it once could.
+        measurement_type = custom.measurement_type
+        expected_unit = CUSTOM_MEASUREMENT_UNITS[measurement_type]
+        if unit is not None and unit != expected_unit:
+            raise ValidationError(f"{custom.name} is measured in {expected_unit}, not {unit}.")
+        unit = expected_unit
         # Found live: same gap as set_amounts above — amount is stored as
         # Numeric(10,2); a value like 0.004 passes `amount <= 0` but rounds
         # to 0.00 in storage, which the database then rejects uncaught.
@@ -1186,6 +1334,157 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
             "total_volume": total, "prescription": prescription}
 
 
+# --- Soreness reporting & target reduction ----------------------------------
+
+SORENESS_REDUCE_PCT = 0.25  # 25% target reduction on trigger
+SORENESS_AUTO_RESTORE_DAYS = 14
+
+
+def report_soreness(session: Session, user_id: str, activity_type: str) -> dict:
+    """Records a soreness report, then checks both trigger conditions. If
+    either is met and the entry isn't already reduced, reduces it instantly
+    (does not wait for the weekly job). Returns {"reduced": bool,
+    "target_amount": float} so the frontend knows whether to show the
+    'reduced' state immediately."""
+    t = session.get(ActivityTaxonomy, activity_type)
+    if t is None:
+        raise NotFound(f"Unknown activity: {activity_type}")
+    entry = session.get(UserProgram, (user_id, activity_type))
+    if entry is None:
+        raise NotFound(f"{activity_type} is not in your plan.")
+
+    session.add(SorenessReport(user_id=user_id, activity_type=activity_type))
+    session.flush()
+
+    if entry.soreness_reduced_since is not None:
+        return {"reduced": True, "target_amount": float(entry.target_amount)}
+
+    recent = session.scalars(
+        select(SorenessReport.reported_at)
+        .where(SorenessReport.user_id == user_id,
+               SorenessReport.activity_type == activity_type)
+        .order_by(SorenessReport.reported_at.desc())
+        .limit(3)
+    ).all()
+    # (a) two most recent reports are THIS one and the immediately-preceding
+    # one, with no successful (non-sore) log of this same activity logged
+    # in between -- approximate "consecutive" by just checking the 2 most
+    # recent soreness reports exist; a simpler, equally valid reading of
+    # "2 in a row" for v1. (b) 3rd-most-recent report (if any) is within 7
+    # days of now.
+    triggered = len(recent) >= 2
+    if not triggered and len(recent) >= 3:
+        triggered = (datetime.now(timezone.utc) - recent[2]).days <= 7
+
+    if not triggered:
+        return {"reduced": False, "target_amount": float(entry.target_amount)}
+
+    entry.pre_soreness_target_amount = entry.target_amount
+    entry.pre_soreness_internal_target_amount = entry.internal_target_amount
+    entry.target_amount = round(float(entry.target_amount) * (1 - SORENESS_REDUCE_PCT), 2)
+    if entry.internal_target_amount is not None:
+        entry.internal_target_amount = float(entry.internal_target_amount) * (1 - SORENESS_REDUCE_PCT)
+    entry.soreness_reduced_since = datetime.now(timezone.utc)
+    session.add(ProgressionHistory(
+        user_id=user_id, activity_type=activity_type,
+        old_target=entry.pre_soreness_target_amount, new_target=entry.target_amount,
+        adherence_pct=0, curve_pct=-SORENESS_REDUCE_PCT * 100, reason="soreness_reduce",
+    ))
+    session.flush()
+    return {"reduced": True, "target_amount": float(entry.target_amount)}
+
+
+def clear_soreness(session: Session, user_id: str, activity_type: str) -> dict:
+    """Explicit 'no longer sore' — restores the exact pre-reduction target."""
+    entry = session.get(UserProgram, (user_id, activity_type))
+    if entry is None or entry.soreness_reduced_since is None:
+        raise NotFound(f"{activity_type} is not currently soreness-reduced.")
+    old_target = entry.target_amount
+    entry.target_amount = entry.pre_soreness_target_amount
+    entry.internal_target_amount = entry.pre_soreness_internal_target_amount
+    entry.soreness_reduced_since = None
+    entry.pre_soreness_target_amount = None
+    entry.pre_soreness_internal_target_amount = None
+    session.add(ProgressionHistory(
+        user_id=user_id, activity_type=activity_type,
+        old_target=old_target, new_target=entry.target_amount,
+        adherence_pct=0, curve_pct=0, reason="soreness_restore",
+    ))
+    session.flush()
+    return {"target_amount": float(entry.target_amount)}
+
+
+def auto_restore_stale_soreness(session: Session, user_id: str) -> None:
+    """Safety net: call this once at the top of whatever function already
+    builds the dashboard summary (find the existing `def dashboard` data
+    assembly in app/profile/service.py used by GET /v1/dashboard/summary,
+    and call this at its start) -- restores any entry whose
+    soreness_reduced_since is more than SORENESS_AUTO_RESTORE_DAYS days old
+    AND has had no new SorenessReport since then, exactly like clear_soreness
+    above, just triggered automatically instead of by the user tapping a
+    button."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SORENESS_AUTO_RESTORE_DAYS)
+    stale = session.scalars(
+        select(UserProgram).where(
+            UserProgram.user_id == user_id,
+            UserProgram.soreness_reduced_since.is_not(None),
+            UserProgram.soreness_reduced_since < cutoff,
+        )
+    ).all()
+    for entry in stale:
+        latest_report = session.scalar(
+            select(func.max(SorenessReport.reported_at))
+            .where(SorenessReport.user_id == user_id,
+                   SorenessReport.activity_type == entry.activity_type)
+        )
+        if latest_report and latest_report >= cutoff:
+            continue  # reported again recently -- stay reduced
+        clear_soreness(session, user_id, entry.activity_type)
+
+
+def list_soreness_status(session: Session, user_id: str) -> list[dict]:
+    rows = session.scalars(
+        select(UserProgram).where(
+            UserProgram.user_id == user_id,
+            UserProgram.soreness_reduced_since.is_not(None),
+        )
+    ).all()
+    out = []
+    for r in rows:
+        t = session.get(ActivityTaxonomy, r.activity_type)
+        out.append({
+            "activity_type": r.activity_type,
+            "display_name": t.display_name if t else r.activity_type,
+            "reduced_since": r.soreness_reduced_since.isoformat(),
+        })
+    return out
+
+
+# --- Water intake logging ---------------------------------------------------
+
+WATER_DAILY_CAP = 40  # sanity ceiling, not a real medical limit -- just
+                      # guards against a mis-tap spam loop logging something absurd
+
+
+def add_water_glass(session: Session, user_id: str) -> dict:
+    today = today_ist()
+    row = session.get(WaterIntakeLog, (user_id, today))
+    if row is None:
+        row = WaterIntakeLog(user_id=user_id, local_date=today, glasses_count=0)
+        session.add(row)
+    if row.glasses_count >= WATER_DAILY_CAP:
+        raise ValidationError(f"Cannot log more than {WATER_DAILY_CAP} glasses in one day.")
+    row.glasses_count += 1
+    session.flush()
+    return {"glasses_count": row.glasses_count, "date": today.isoformat()}
+
+
+def get_water_today(session: Session, user_id: str) -> dict:
+    today = today_ist()
+    row = session.get(WaterIntakeLog, (user_id, today))
+    return {"glasses_count": row.glasses_count if row else 0, "date": today.isoformat()}
+
+
 # --- Workout sessions (guided player) ---------------------------------------
 
 def _get_active_workout_session(session: Session, user_id: str,
@@ -1262,8 +1561,10 @@ def _normalise_exercise_name(name: str) -> str:
 
 def _custom_exercise_out(row: CustomExercise, *, completed_today: bool = False) -> dict:
     return {"id": row.id, "name": row.name,
-            "measurement_types": row.measurement_types,
-            "units": [CUSTOM_MEASUREMENT_UNITS[t] for t in row.measurement_types],
+            "measurement_type": row.measurement_type,
+            "unit": CUSTOM_MEASUREMENT_UNITS[row.measurement_type],
+            "target_sets": row.target_sets if row.measurement_type == "reps" else None,
+            "target_amount": float(row.target_amount),
             "completed_today": completed_today}
 
 
@@ -1310,14 +1611,16 @@ def _reject_if_matches_taxonomy(session: Session, normalized: str, label: str) -
 
 
 def create_custom_exercise(session: Session, user_id: str, *, name: str,
-                           measurement_types: list[str],
+                           measurement_type: str, target_amount: float,
+                           target_sets: int = 1,
                            acting_manager_id: str | None = None) -> dict:
-    """Managed plans: a manager can create a custom (tracking-only) exercise
-    for their managed person too — see
-    MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md. Custom exercises have no
-    auto_progress concept at all, for anyone, today (4.4 — tracking-only,
-    never auto-progressed), so unlike add_program_entry there's nothing to
-    toggle here; this purely extends WHO can create one, not what it does.
+    """Managed plans: a manager can create a custom exercise for their
+    managed person too — see MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md.
+    Custom exercises have no auto_progress concept at all, for anyone, today
+    (never auto-progressed — the target here is a fixed prescription, not
+    something this app adjusts on its own), so unlike add_program_entry
+    there's nothing to toggle here; this purely extends WHO can create one,
+    not what it does.
     """
     if acting_manager_id is not None:
         require_active_relationship(session, acting_manager_id, user_id)
@@ -1327,16 +1630,15 @@ def create_custom_exercise(session: Session, user_id: str, *, name: str,
     if len(name) > 64:
         raise ValidationError("Name must be 64 characters or fewer.")
     _reject_unsafe_name(name)
-    # De-dup while keeping the order the user picked them in.
-    measurement_types = list(dict.fromkeys(measurement_types or []))
-    if not measurement_types:
-        raise ValidationError("Pick at least one way to count it.")
-    if len(measurement_types) > 3:
-        raise ValidationError("Pick at most 3 ways to count it.")
-    unknown = [m for m in measurement_types if m not in CUSTOM_MEASUREMENT_UNITS]
-    if unknown:
+    if measurement_type not in CUSTOM_MEASUREMENT_UNITS:
         raise ValidationError(
-            f"measurement_types must be one of: {', '.join(sorted(CUSTOM_MEASUREMENT_UNITS))}")
+            f"measurement_type must be one of: {', '.join(sorted(CUSTOM_MEASUREMENT_UNITS))}")
+    if round(target_amount, 2) <= 0:
+        raise ValidationError("Enter a target greater than zero.")
+    if measurement_type in ("distance", "duration"):
+        target_sets = 1  # a single effort, same convention as ActivityTaxonomy
+    elif target_sets < 1:
+        raise ValidationError("Sets must be at least 1.")
 
     normalized = _normalise_exercise_name(name)
     _reject_if_matches_taxonomy(session, normalized, name)
@@ -1359,7 +1661,8 @@ def create_custom_exercise(session: Session, user_id: str, *, name: str,
 
     row = CustomExercise(
         user_id=user_id, name=name, normalized_name=normalized,
-        measurement_types=measurement_types,
+        measurement_type=measurement_type, target_sets=target_sets,
+        target_amount=target_amount,
     )
     session.add(row)
     session.flush()
@@ -1582,6 +1885,12 @@ def activity_log_detail(session: Session, user_id: str, *,
             "amount": float(log.amount_per_set),
             "unit": log.unit,
             "total_volume": float(log.total_volume),
+            # The real per-set breakdown when one was logged (e.g. a set
+            # edited to something other than its target) — "amount" above is
+            # their average, which a display can fall back to when this is
+            # null rather than show a blended number that was never the
+            # actual figure for any single set.
+            "set_amounts": [float(v) for v in log.set_amounts] if log.set_amounts else None,
         }
         for log, taxonomy_name, custom_name in rows
     ]
@@ -1755,6 +2064,40 @@ def video_library(session: Session, user_id: str) -> dict:
     } for v, t in rows if v.activity_type not in blocked]}
 
 
+_EXERCISEDB_DATA = Path(__file__).resolve().parents[2] / "data"
+_exercise_library_cache: list[dict] | None = None
+
+
+def exercise_library(session: Session, user_id: str) -> dict:
+    """Reference browse list built from the ExerciseDB bulk import (see
+    scripts/dev_tools/fetch_full_exercisedb.py). Only exercises we actually
+    have a downloaded GIF for are included -- the RapidAPI free-tier quota
+    means not all 1300+ exercises have one yet; re-running that script next
+    billing cycle fills in more over time.
+
+    A managed account (child/student/patient on someone else's plan) has no
+    use for a self-service exercise browser — their plan is built for them,
+    same reasoning as video_library's is_referred gate above."""
+    if is_managed_account(session, user_id):
+        raise Forbidden("Ask the person managing your plan about this.")
+    global _exercise_library_cache
+    if _exercise_library_cache is None:
+        catalog_path = _EXERCISEDB_DATA / "exercisedb_catalog.json"
+        progress_path = _EXERCISEDB_DATA / "exercisedb_fetch_progress.json"
+        catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else []
+        fetched_ids = (set(json.loads(progress_path.read_text())["fetched_ids"])
+                       if progress_path.exists() else set())
+        _exercise_library_cache = sorted((
+            {"id": ex["id"], "name": ex["name"].title(),
+             "body_part": ex.get("bodyPart"), "target": ex.get("target"),
+             "equipment": ex.get("equipment"),
+             "instructions": ex.get("instructions", []),
+             "gif_url": f"/static/exercisedb_gifs/{ex['id']}.gif"}
+            for ex in catalog if ex["id"] in fetched_ids
+        ), key=lambda e: e["name"])
+    return {"count": len(_exercise_library_cache), "exercises": _exercise_library_cache}
+
+
 def set_video(session: Session, activity_type: str, url_or_id: str,
               title: str | None = None) -> dict:
     """Admin curation (7.1). Accepts a full YouTube URL or a bare id."""
@@ -1811,4 +2154,8 @@ def profile_summary(session: Session, user_id: str) -> dict:
         "unit_preference": prof.unit_preference if prof else "km",
         "conditions": [{"code": c, "name": n, "bucket": b} for c, n, b in conds],
         "referred": is_referred(session, user_id),
+        # Managed plans (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md): a
+        # managed person can't also manage others — the frontend hides the
+        # "Manage Plans for Others" entry point based on this.
+        "is_managed_account": is_managed_account(session, user_id),
     }

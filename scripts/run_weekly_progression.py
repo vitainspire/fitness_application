@@ -23,7 +23,13 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from dotenv import load_dotenv
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+dev_env = REPO_ROOT / ".env.dev"
+if dev_env.exists():
+    load_dotenv(dev_env)
 
 from sqlalchemy import select  # noqa: E402
 
@@ -39,7 +45,7 @@ from app.auth.models import User  # noqa: E402
 
 from app.profile.models import UserProgram  # noqa: E402
 from app.profile.service import today_ist  # noqa: E402
-from app.progression.service import run_weekly_progression  # noqa: E402
+from app.progression.service import run_daily_progression_batch  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
@@ -54,46 +60,9 @@ def main() -> None:
         print("RLM_WEEKLY_PROGRESSION_ENABLED=false — skipping this run.")
         return
     init_engine(cfg.database_url)
-    today = today_ist()
-
-    with session_scope() as session:
-        # One row per (user_id, signup weekday) — a single indexed join, not
-        # a per-user query, so this scales the same way the old distinct()
-        # query did.
-        rows = session.execute(
-            select(UserProgram.user_id, User.created_at)
-            .join(User, User.id == UserProgram.user_id)
-            .where(UserProgram.status == "active")
-            .distinct()
-        ).all()
-        due_user_ids = [
-            user_id for user_id, created_at in rows
-            if created_at.date().weekday() == today.weekday()
-        ]
-
-    # Found live (code audit): this used to run every due user inside ONE
-    # shared transaction, committed once at the end. A single unhandled
-    # exception on any one user (a DB overflow, a malformed row, anything
-    # unanticipated) rolled back progression for every user already
-    # processed that run, with no retry — one bad entry could silently deny
-    # an entire day's cohort their weekly update. Each user now gets their
-    # own transaction and is isolated with its own try/except: one failure
-    # is logged and skipped, everyone else still gets processed and
-    # committed.
-    total_users, total_adjustments, failed_users = 0, 0, 0
-    for user_id in due_user_ids:
-        try:
-            with session_scope() as session:
-                adjustments = run_weekly_progression(session, user_id, today=today)
-            total_users += 1
-            total_adjustments += len(adjustments)
-        except Exception:
-            failed_users += 1
-            _log.exception("Weekly progression failed for user_id=%s — skipped, "
-                            "other users are unaffected.", user_id)
-
-    print(f"Progression run complete: {total_users} user(s) due today, "
-          f"{total_adjustments} entry adjustment(s), {failed_users} failed.")
+    res = run_daily_progression_batch()
+    print(f"Progression run complete: {res['total_users']} user(s) due today, "
+          f"{res['total_adjustments']} entry adjustment(s), {res['failed_users']} failed.")
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ class ProgressionHistory(Base):
     __table_args__ = (
         CheckConstraint(
             "reason IN ('curve','hold','reduce','floor','escalation','double_progression',"
-            "'set_created','set_boost','pro_level')",
+            "'set_created','set_boost','pro_level','soreness_reduce','soreness_restore')",
             name="ph_reason_known"),
         Index("ix_progression_history_user_activity", "user_id", "activity_type"),
     )
