@@ -223,15 +223,18 @@ def test_suspended_entry_is_never_progressed(make_user):
         assert all(r.activity_type != ACTIVITY for r in rows)
 
 
-def test_user_override_entry_is_never_progressed(make_user):
+def test_user_override_entry_is_never_progressed(make_user, force_avoid_cell):
     """14.7 / 15.2 — the user chose to keep tracking something the grid flagged;
     the app must not increase its intensity.
 
-    herniated_disk x hamstring_stretch is an actual `avoid` cell in the safety
-    grid (a `supported`-bucket condition, unlike a refer-bucket condition, which
-    would block add_program_entry entirely before source ever matters here)."""
+    herniated_disk x hamstring_stretch is forced to an `avoid` cell for this
+    test (a `supported`-bucket condition, unlike a refer-bucket condition,
+    which would block add_program_entry entirely before source ever matters
+    here) — see conftest.py's force_avoid_cell for why this isn't the real
+    grid data anymore."""
     from app.progression.service import run_weekly_progression
 
+    force_avoid_cell("herniated_disk", "hamstring_stretch")
     override_activity = "hamstring_stretch"
     user = make_user(condition_codes=["herniated_disk"])
     with session_scope() as s:

@@ -26,9 +26,21 @@ function assetUrl(path) {
   return /^https?:\/\//.test(path) ? path : API_BASE + path;
 }
 
-const NAV_ON = "fixed bottom-md left-1/2 -translate-x-1/2 w-[90%] max-w-md z-50 flex justify-between items-center px-md py-sm bg-surface-container-lowest/80 backdrop-blur-md shadow-lg rounded-full";
+// A managed account only ever sees 2 of the 5 nav buttons (home + start
+// workout — chat/videos/profile are hidden, see MANAGED_HIDDEN_SCREENS
+// below), so justify-between would stretch them to the pill's opposite
+// edges with a huge gap; justify-center keeps the visible ones together.
+function navOnClass() {
+  const justify = IS_MANAGED_ACCOUNT ? "justify-center gap-[56px]" : "justify-between";
+  return `fixed bottom-4 left-1/2 -translate-x-1/2 w-[calc(100%-24px)] max-w-[400px] z-50 flex ${justify} items-center px-md py-sm bg-white/85 backdrop-blur-xl border border-white/80 shadow-lg rounded-full`;
+}
 const DEV = "web-" + (localStorage.getItem("did") || (()=>{const d=Math.random().toString(36).slice(2,10);localStorage.setItem("did",d);return d})());
 let AT = localStorage.getItem("at"), RT = localStorage.getItem("rt"), EMAIL = localStorage.getItem("em") || "";
+// Set once per session by route() below, from /v1/profile's is_managed_account.
+// A managed account has nothing usable left in Settings (no real password to
+// change it with, logout/delete already blocked) — confirmed directly: the
+// whole screen is removed from their experience, not just those two rows.
+let IS_MANAGED_ACCOUNT = false;
 
 // Found live: two tabs sharing one login can each get a 401 and call
 // /v1/auth/refresh with the SAME (stale) refresh token at nearly the same
@@ -47,6 +59,23 @@ window.addEventListener("storage", (e) => {
 });
 let HOME_ITEMS = [];
 let HOME_CUSTOM_ITEMS = [];
+let CACHED_PROGRESSION = [];
+let ALL_TARGET_CHANGES = [];
+let CURRENT_TARGET_FILTER = "all";
+const TAX_UNIT_LOOKUP = {
+  walk: "km",
+  running: "km",
+  neck_isometric: "sec",
+  shoulder_circles: "reps",
+  lower_back_side_stretch: "sec",
+  glute_bridge: "reps",
+  dead_bug: "reps",
+  hamstring_stretch: "sec",
+  quad_stretch: "sec",
+  calf_stretch: "sec",
+  ankle_circles: "reps",
+  wrist_circles: "reps",
+};
 const $ = id => document.getElementById(id);
 
 // User-supplied or model-generated text (a custom exercise name, a
@@ -151,15 +180,32 @@ async function api(method, path, body, _retried) {
   return d;
 }
 
+// A managed account (student/patient/child using someone else's invite
+// link) has no use for Settings, the rehab chatbot, or the exercise
+// browse library — the plan is built FOR them, not something they tune or
+// explore on their own. Shared by go()'s redirect-away guard and its
+// nav-button hiding below, so both stay in sync automatically.
+const MANAGED_HIDDEN_SCREENS = ["profile", "chat", "videos"];
+
 function go(name) {
+  // Redirect away even if something (an old bookmark, the browser's back
+  // button) tries to land here directly, not just hide the nav button that
+  // normally gets here.
+  if (IS_MANAGED_ACCOUNT && MANAGED_HIDDEN_SCREENS.includes(name)) { go("home"); return; }
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("on"));
   $("s-" + name).classList.add("on");
-  $("nav").className = ["auth","onboard","player"].includes(name) ? "hidden" : NAV_ON;
+  $("nav").className = ["auth","onboard","player","gps","reset-password"].includes(name) ? "hidden" : navOnClass();
   document.querySelectorAll(".nav-btn").forEach(b => {
     const on = b.dataset.t === name;
+    // Rebuilt every time (see above), so a hidden button's class set by
+    // route() must be re-applied here too, not just once at login —
+    // otherwise the very next go() call (home, anything) would wipe it
+    // back to visible.
+    const hide = MANAGED_HIDDEN_SCREENS.includes(b.dataset.t) && IS_MANAGED_ACCOUNT;
     b.className = (on
       ? "nav-btn flex flex-row items-center gap-xs bg-primary-container text-on-primary-container rounded-full px-md py-xs"
-      : "nav-btn flex items-center justify-center text-secondary p-xs rounded-full") + " active:scale-90 duration-200";
+      : "nav-btn flex items-center justify-center text-secondary p-xs rounded-full")
+      + " active:scale-90 duration-200" + (hide ? " hidden" : "");
   });
   window.scrollTo(0,0);
   // Every loader is fired and forgotten, so an unhandled rejection used to
@@ -208,12 +254,224 @@ function loadNotifications() {
 // tab, so it's excluded here rather than overwritten with go(undefined).
 document.querySelectorAll(".nav-btn[data-t]").forEach(b => b.onclick = () => go(b.dataset.t));
 
+// ── auth mode & password helpers ──
+let authMode = "login";
+window.authMode = "login";
+
+function setAuthMode(mode) {
+  authMode = mode;
+  window.authMode = mode;
+  const isLogin = mode === "login";
+  if ($("a-title")) $("a-title").textContent = isLogin ? "Welcome Back" : "Create Account";
+  if ($("a-sub")) $("a-sub").textContent = isLogin
+    ? "Sign in to access your workouts & recovery plan."
+    : "Create an account to begin your personalized journey.";
+
+  if ($("auth-tab-login")) {
+    $("auth-tab-login").className = isLogin
+      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs"
+      : "flex-1 py-1.5 text-xs font-bold rounded-full transition-all text-on-surface-variant hover:text-on-surface";
+  }
+  if ($("auth-tab-signup")) {
+    $("auth-tab-signup").className = !isLogin
+      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs"
+      : "flex-1 py-1.5 text-xs font-bold rounded-full transition-all text-on-surface-variant hover:text-on-surface";
+  }
+  if ($("a-submit-btn")) $("a-submit-btn").textContent = isLogin ? "Sign In" : "Create Account";
+  if ($("a-toggle-btn")) {
+    $("a-toggle-btn").textContent = isLogin
+      ? "New to ViTAinspire? Create account"
+      : "Already have an account? Sign in";
+  }
+
+  if ($("a-forgot-wrap")) $("a-forgot-wrap").classList.toggle("hidden", !isLogin);
+  if ($("a-pw-rules-wrap")) $("a-pw-rules-wrap").classList.toggle("hidden", isLogin);
+  if ($("a-err")) $("a-err").className = "hidden";
+}
+
+function toggleAuthMode() {
+  setAuthMode(authMode === "login" ? "signup" : "login");
+}
+
+function submitAuthForm() {
+  doAuth(authMode);
+}
+
+function togglePasswordVisibility(inputId, iconId) {
+  const input = $(inputId);
+  const icon = $(iconId);
+  if (!input) return;
+  const isPass = input.type === "password";
+  input.type = isPass ? "text" : "password";
+  if (icon) icon.textContent = isPass ? "visibility_off" : "visibility";
+}
+
+function checkPasswordRules(passInputId, confirmInputId, prefix) {
+  const p = $(passInputId)?.value || "";
+  const conf = confirmInputId ? ($(confirmInputId)?.value || "") : "";
+
+  const rules = {
+    upper: /[A-Z]/.test(p),
+    lower: /[a-z]/.test(p),
+    number: /[0-9]/.test(p),
+    special: /[^a-zA-Z0-9]/.test(p),
+    length: p.length >= 10,
+    match: confirmInputId ? (p.length > 0 && p === conf) : true,
+  };
+
+  const updateBadge = (id, valid) => {
+    const el = $(id);
+    if (!el) return;
+    const icon = el.querySelector(".material-symbols-outlined");
+    if (valid) {
+      el.className = "flex items-center gap-1.5 text-emerald-600 font-medium";
+      if (icon) icon.textContent = "check_circle";
+    } else {
+      el.className = "flex items-center gap-1.5 text-secondary";
+      if (icon) icon.textContent = "radio_button_unchecked";
+    }
+  };
+
+  updateBadge(`${prefix}-rule-upper`, rules.upper);
+  updateBadge(`${prefix}-rule-lower`, rules.lower);
+  updateBadge(`${prefix}-rule-number`, rules.number);
+  updateBadge(`${prefix}-rule-special`, rules.special);
+  updateBadge(`${prefix}-rule-length`, rules.length);
+  if (confirmInputId) {
+    updateBadge(`${prefix}-rule-match`, rules.match);
+  }
+
+  return rules;
+}
+
+// ── forgot password modal ──
+function openForgotPasswordModal() {
+  const m = $("forgot-pw-modal");
+  if (!m) return;
+  if ($("fp-email")) $("fp-email").value = $("a-email")?.value?.trim() || EMAIL || "";
+  if ($("fp-err")) $("fp-err").className = "hidden";
+  if ($("fp-success")) $("fp-success").className = "hidden";
+  const btn = $("fp-submit-btn");
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = "Send Reset Link";
+  }
+  m.classList.remove("hidden");
+  m.classList.add("flex");
+}
+
+function closeForgotPasswordModal() {
+  const m = $("forgot-pw-modal");
+  if (!m) return;
+  m.classList.add("hidden");
+  m.classList.remove("flex");
+}
+
+async function submitForgotPassword() {
+  const email = $("fp-email")?.value?.trim();
+  if (!email) {
+    $("fp-err").textContent = "Please enter your email address.";
+    $("fp-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    return;
+  }
+  const btn = $("fp-submit-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Sending...";
+  }
+  if ($("fp-err")) $("fp-err").className = "hidden";
+  if ($("fp-success")) $("fp-success").className = "hidden";
+
+  try {
+    await api("POST", "/v1/auth/password-reset/request", { email });
+    $("fp-success").innerHTML = `
+      <div class="space-y-1">
+        <p class="font-bold text-emerald-950">Reset Email Dispatched!</p>
+        <p>If an account exists for <span class="font-semibold underline">${email}</span>, a secure password reset link was sent from <strong class="text-emerald-950">ayush.kumar@vitainspire.com</strong>.</p>
+        <p class="text-[11px] text-emerald-700 mt-1">Please check your inbox or spam folder. Click the link in the email to set your new password.</p>
+      </div>
+    `;
+    $("fp-success").className = "rounded-lg px-md py-sm font-body-md bg-emerald-100 text-emerald-800 text-xs";
+    if (btn) btn.textContent = "Link Sent";
+  } catch (e) {
+    $("fp-err").textContent = e.message || "Failed to send reset link.";
+    $("fp-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Send Reset Link";
+    }
+  }
+}
+
+// ── reset password screen ──
+async function submitNewPassword() {
+  const token = $("r-token")?.value?.trim();
+  const pass = $("r-pass")?.value || "";
+  const confirm = $("r-pass-confirm")?.value || "";
+
+  if (!token) {
+    $("r-err").textContent = "Reset code / token is required. Please check your reset link or email.";
+    $("r-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    return;
+  }
+  if (!pass) {
+    $("r-err").textContent = "Please enter a new password.";
+    $("r-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    return;
+  }
+  if (pass !== confirm) {
+    $("r-err").textContent = "Passwords do not match. Please re-type your password.";
+    $("r-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    return;
+  }
+
+  const rules = checkPasswordRules("r-pass", "r-pass-confirm", "r");
+  if (!rules.length || !rules.upper || !rules.lower || !rules.number || !rules.special) {
+    $("r-err").textContent = "Password must have at least 1 capital letter, 1 small letter, 1 number, 1 special character, and be at least 10 characters long.";
+    $("r-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    return;
+  }
+
+  const btn = $("r-submit-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Updating...";
+  }
+  if ($("r-err")) $("r-err").className = "hidden";
+  if ($("r-success")) $("r-success").className = "hidden";
+
+  try {
+    await api("POST", "/v1/auth/password-reset/confirm", {
+      token,
+      password: pass,
+    });
+    $("r-success").textContent = "Password updated successfully! Redirecting to sign in...";
+    $("r-success").className = "rounded-lg px-md py-sm font-body-md bg-emerald-100 text-emerald-800 text-xs font-semibold";
+    $("r-pass").value = "";
+    $("r-pass-confirm").value = "";
+    $("r-token").value = "";
+
+    setTimeout(() => {
+      setAuthMode("login");
+      go("auth");
+      toast("Password updated — please sign in with your new password");
+    }, 1500);
+  } catch (e) {
+    $("r-err").textContent = e.message || "Failed to update password.";
+    $("r-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Update Password";
+    }
+  }
+}
+
 // ── auth ──
 async function doAuth(mode) {
   const email = $("a-email").value.trim();
   if (!email) {
     $("a-err").textContent = "Enter your email address.";
-    $("a-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container";
+    $("a-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
     return;
   }
   try {
@@ -224,16 +482,16 @@ async function doAuth(mode) {
     await route();
   } catch (e) {
     $("a-err").textContent = e.message;
-    $("a-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container";
+    $("a-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
   }
 }
 
 async function route() {
   const p = await api("GET", "/v1/profile");
-  await claimPendingInviteIfAny();
+  IS_MANAGED_ACCOUNT = !!p.is_managed_account; // read by go()'s own nav-button rendering
   renderNotifBadge();
   if (!p.onboarded) { await loadOnboarding(); go("onboard"); return; }
-  if (p.referred) { $("refer-msg").textContent = "We can't suggest exercises based on what you selected."; go("refer"); $("nav").className = NAV_ON; return; }
+  if (p.referred) { $("refer-msg").textContent = "We can't suggest exercises based on what you selected."; go("refer"); $("nav").className = navOnClass(); return; }
   go("home");
 }
 
@@ -276,7 +534,7 @@ async function submitOnboarding() {
     const d = await api("POST", "/v1/profile/onboarding", {
       age: parseInt($("o-age").value,10), goal, experience_band: band, condition_codes:[...picked]});
     $("o-err").className = "hidden";
-    if (d.referred) { $("refer-msg").textContent = d.message; go("refer"); $("nav").className = NAV_ON; return; }
+    if (d.referred) { $("refer-msg").textContent = d.message; go("refer"); $("nav").className = navOnClass(); return; }
     go("home");
   } catch (e) {
     $("o-err").textContent = e.message;
@@ -438,18 +696,28 @@ function renderActivityHeatmap(daily) {
   }).join("");
 }
 
-// ── custom exercises (4.4) — personal, tracking-only, never suggested ──
+// ── custom exercises (4.4) — personal, fixed-target exercises, never suggested ──
 let customExercises = [];
-let customMeasurementTypes = []; // 1-3 of CUSTOM_TYPES, in pick order
+let customMeasurementType = "reps";
 let customPhase = "name"; // name -> type
 const CUSTOM_TYPES = [["reps","Reps"],["distance","Distance"],["duration","Time"]];
+const CUSTOM_TYPE_UNIT = { reps: "count", distance: "km", duration: "min" };
+
+// Shared by both custom-exercise forms (the self-service one here, and the
+// managed-plan one in main.js's managed-add section) — distance/duration are
+// a single effort (no sets), same convention as a built-in activity.
+function updateCustomTargetFields(type, setsWrapId, amountLabelId) {
+  const single = type === "distance" || type === "duration";
+  $(setsWrapId).classList.toggle("hidden", single);
+  $(amountLabelId).textContent = type === "reps" ? "Reps" : `${CUSTOM_TYPE_UNIT[type] === "km" ? "Distance" : "Duration"} (${CUSTOM_TYPE_UNIT[type]})`;
+}
 
 async function loadCustomExerciseSection() {
   $("custom-name").value = "";
   $("custom-err").className = "hidden";
   $("custom-type-wrap").classList.add("hidden");
   $("custom-continue-btn").textContent = "Continue";
-  customMeasurementTypes = [];
+  customMeasurementType = "reps";
   customPhase = "name";
   const d = await api("GET", "/v1/custom-exercises");
   customExercises = d.custom_exercises;
@@ -470,42 +738,43 @@ function renderCustomList() {
 function renderCustomTypeChips() {
   const box = $("custom-type-chips");
   box.innerHTML = "";
-  CUSTOM_TYPES.forEach(([v, l]) => box.appendChild(chip(l, customMeasurementTypes.includes(v), () => {
-    if (customMeasurementTypes.includes(v)) {
-      customMeasurementTypes = customMeasurementTypes.filter(x => x !== v);
-    } else {
-      customMeasurementTypes.push(v);
-    }
+  CUSTOM_TYPES.forEach(([v, l]) => box.appendChild(chip(l, customMeasurementType === v, () => {
+    customMeasurementType = v;
     renderCustomTypeChips();
+    updateCustomTargetFields(v, "custom-target-sets-wrap", "custom-target-amount-label");
   })));
 }
 
 // Add a New One only ever CREATES the exercise (mirrors exactly how adding a
-// built-in exercise via addFromCatalogue just adds it, never logs it).
-// Logging happens separately, whenever the user actually does it, via its
-// card in the "Your Own Exercises" section on Home. Pick 1, 2, or all 3 of
-// Reps/Distance/Time — the card on Home then asks for all of the ones picked.
+// built-in exercise via addFromCatalogue just adds it, never logs it) — with
+// a fixed target set up front, the same shape as a built-in activity's own
+// default_sets/default_amount. Logging happens separately, whenever the user
+// actually does it, via its card in the "Your Own Exercises" section on Home.
 function customContinue() {
   if (customPhase === "type") {
-    if (!customMeasurementTypes.length) { toast("Pick at least one way to count it", true); return; }
-    submitCustomCreate();
+    const amount = parseFloat($("custom-target-amount").value);
+    if (!amount || amount <= 0) { toast("Enter a target greater than zero.", true); return; }
+    const sets = parseInt($("custom-target-sets").value, 10) || 1;
+    submitCustomCreate(amount, sets);
     return;
   }
   const name = $("custom-name").value.trim();
   if (!name) { toast("Type a name first", true); return; }
   const match = customExercises.find(c => c.name.toLowerCase() === name.toLowerCase());
   if (match) { toast(`You already have "${match.name}" — log it from the Home screen`, true); return; }
-  customMeasurementTypes = [];
+  customMeasurementType = "reps";
   customPhase = "type";
   $("custom-type-wrap").classList.remove("hidden");
   renderCustomTypeChips();
+  updateCustomTargetFields("reps", "custom-target-sets-wrap", "custom-target-amount-label");
   $("custom-continue-btn").textContent = "Save";
 }
 
-async function submitCustomCreate() {
+async function submitCustomCreate(amount, sets) {
   try {
     await api("POST", "/v1/custom-exercises", {
-      name: $("custom-name").value.trim(), measurement_types: customMeasurementTypes,
+      name: $("custom-name").value.trim(), measurement_type: customMeasurementType,
+      target_amount: amount, target_sets: sets,
     });
     closeCatalogue();
     toast("Added — log it anytime from the Dashboard");
@@ -546,6 +815,79 @@ async function deleteCustomExercise(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+function getActivityBadge(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("walk")) {
+    return { icon: "directions_walk", bg: "bg-emerald-500/15 text-emerald-700 border-emerald-500/30" };
+  }
+  if (n.includes("run")) {
+    return { icon: "directions_run", bg: "bg-amber-500/15 text-amber-700 border-amber-500/30" };
+  }
+  if (n.includes("cycl") || n.includes("bike")) {
+    return { icon: "directions_bike", bg: "bg-sky-500/15 text-sky-700 border-sky-500/30" };
+  }
+  if (n.includes("swim")) {
+    return { icon: "pool", bg: "bg-cyan-500/15 text-cyan-700 border-cyan-500/30" };
+  }
+  if (n.includes("stretch") || n.includes("yoga")) {
+    return { icon: "self_improvement", bg: "bg-purple-500/15 text-purple-700 border-purple-500/30" };
+  }
+  return { icon: "fitness_center", bg: "bg-primary/10 text-primary border-primary/20" };
+}
+
+function renderRecentActivities(entries) {
+  const container = $("h-recent-activities-list");
+  if (!container) return;
+  if (!entries || !entries.length) {
+    container.innerHTML = `
+      <div class="bg-white/70 backdrop-blur-md border border-dashed border-outline-variant/60 rounded-2xl p-md text-center space-y-1">
+        <p class="font-label-bold text-label-bold text-on-surface">No activities logged in the last 7 days</p>
+        <p class="text-xs text-secondary">Track an outdoor walk/run with the GPS button below or tap the dumbbell to start a workout.</p>
+      </div>`;
+    return;
+  }
+
+  const recent = entries.slice(0, 5);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+  container.innerHTML = recent.map(e => {
+    const badge = getActivityBadge(e.name);
+    let dateLabel = e.date;
+    if (e.date === todayStr) dateLabel = "Today";
+    else if (e.date === yesterdayStr) dateLabel = "Yesterday";
+
+    // "count" is reps-type's internal unit name, never meant for display —
+    // same convention as openCatalogueAddEditor's own amount_unit handling.
+    const unit = escapeHtml(e.unit === "count" ? "reps" : (e.unit || ""));
+    // Real per-set numbers when they differ (e.g. 11, 13 instead of the
+    // blended "2 x 12" average that was never the true figure for either set).
+    const valDisplay = e.set_amounts
+      ? `${e.set_amounts.join(", ")} ${unit}`
+      : e.sets && e.sets > 1
+      ? `${e.sets} × ${e.amount} ${unit}`
+      : `${e.amount} ${unit}`;
+
+    return `
+      <div class="flex items-center justify-between bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md hover:bg-white/95 transition-all">
+        <div class="flex items-center gap-md">
+          <div class="w-10 h-10 rounded-xl ${badge.bg} border flex items-center justify-center flex-shrink-0 shadow-xs">
+            <span class="material-symbols-outlined text-[20px]">${badge.icon}</span>
+          </div>
+          <div>
+            <p class="font-label-bold text-label-bold text-on-background">${escapeHtml(e.name)}</p>
+            <p class="font-label-sm text-label-sm text-secondary">${dateLabel}</p>
+          </div>
+        </div>
+        <div class="text-right">
+          <p class="font-headline-sm text-headline-sm font-bold text-on-background">${valDisplay}</p>
+        </div>
+      </div>`;
+  }).join("");
+}
+
 // ── dashboard screen (stats + Your Own Exercises; the program's exercise
 // list itself — formerly "Recommended Today" — now lives entirely inside
 // the guided Workout Player, since it showed exactly the same exercises) ──
@@ -553,14 +895,12 @@ async function loadHome() {
   $("h-avatar").textContent = (EMAIL[0] || "?").toUpperCase();
   $("h-hello").textContent = "Welcome back, " + EMAIL.split("@")[0] + "!";
 
-  // Fired together, not sequentially: the summary's streak/suggestions and
-  // the 365-day trend (for the stat cards + heatmap) don't depend on each
-  // other. suggestions.all_items is kept in HOME_ITEMS purely so the
-  // dumbbell nav icon's startWorkout() has something to start from without
-  // a separate fetch — this screen no longer renders them itself.
-  const [d, yearTrend] = await Promise.all([
+  // Fired together, not sequentially: the summary's streak/suggestions,
+  // 365-day trend, and recent activity logs for the dashboard feed.
+  const [d, yearTrend, recentActivitiesRes] = await Promise.all([
     api("GET", "/v1/dashboard/summary"),
     api("GET", "/v1/dashboard/trend?days=365"),
+    api("GET", "/v1/dashboard/activity-detail?days=7").catch(() => ({ entries: [] })),
   ]);
   HOME_ITEMS = d.suggestions.all_items || [];
   renderStatCards(d.streak, yearTrend.trend);
@@ -571,6 +911,7 @@ async function loadHome() {
   const insight = mostActiveWeekdayInsight(activityYearData);
   $("h-heatmap-insight").textContent = insight || "";
   $("h-heatmap-insight").classList.toggle("hidden", !insight);
+  renderRecentActivities(recentActivitiesRes.entries || []);
 
   // your own exercises — tracking-only, never suggested/programmed (4.4):
   // creating/logging here only ever calls custom-exercise endpoints, never
@@ -579,6 +920,101 @@ async function loadHome() {
   HOME_CUSTOM_ITEMS = custom_exercises;
   $("h-custom-section").classList.toggle("hidden", !custom_exercises.length);
   $("h-custom-cards").innerHTML = custom_exercises.map(renderCustomCard).join("");
+
+  const [waterData, sorenessData] = await Promise.all([
+    api("GET", "/v1/water-intake/today"),
+    api("GET", "/v1/soreness/status"),
+  ]);
+  $("h-water-count").textContent = waterData.glasses_count;
+  const sorenessItems = sorenessData.items || [];
+  if (sorenessItems.length === 0) {
+    $("h-soreness-section").classList.add("hidden");
+  } else {
+    $("h-soreness-section").classList.remove("hidden");
+    $("h-soreness-list").innerHTML = sorenessItems.map(item => `
+      <div class="flex items-center justify-between bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md">
+        <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(item.display_name)}</p>
+        <button onclick="clearSoreness('${item.activity_type}')" class="font-label-bold text-label-bold text-primary">No longer sore</button>
+      </div>
+    `).join("");
+  }
+
+  const [{ activities: pbActivities }, { activities: taxActivities }] = await Promise.all([
+    api("GET", "/v1/personal-bests"),
+    api("GET", "/v1/taxonomy/activities"),
+  ]);
+  const pbMap = Object.assign({}, pbActivities || {});
+  const taxLookup = {};
+  const taxUnitLookup = {};
+  (taxActivities || []).forEach(a => {
+    taxLookup[a.activity_type] = a.display_name;
+    taxUnitLookup[a.activity_type] = a.amount_unit;
+  });
+
+  // Merge peak targets from d.progression for exercises in the user's plan/history
+  (d.progression || []).forEach(act => {
+    const actKey = act.activity_type;
+    const name = act.display_name || taxLookup[actKey] || actKey;
+    let peakVal = 0;
+    let peakDate = "";
+    (act.points || []).forEach(pt => {
+      const v1 = parseFloat(pt.old_target) || 0;
+      const v2 = parseFloat(pt.new_target) || 0;
+      const maxPt = Math.max(v1, v2);
+      if (maxPt > peakVal) {
+        peakVal = maxPt;
+        peakDate = pt.applied_at || "";
+      }
+    });
+    if (peakVal > 0) {
+      if (!pbMap[actKey] || (pbMap[actKey][0] && peakVal > pbMap[actKey][0].value)) {
+        pbMap[actKey] = [{
+          value: peakVal,
+          unit: taxUnitLookup[actKey] || "count",
+          achieved_at: peakDate,
+          display_name: name,
+        }];
+      }
+    }
+  });
+
+  const pbKeys = Object.keys(pbMap).filter(k => Array.isArray(pbMap[k]) && pbMap[k].length > 0);
+  $("h-personal-bests-section").classList.toggle("hidden", !pbKeys.length);
+  $("h-personal-bests-cards").innerHTML = pbKeys.map(k => {
+    const best = pbMap[k][0];
+    const name = best.display_name || taxLookup[k] || k;
+    const dateStr = best.achieved_at ? new Date(best.achieved_at).toLocaleDateString() : "";
+    const pbUnit = escapeHtml(best.unit === "count" ? "reps" : (best.unit || ""));
+    const valDisplay = best.sets && best.sets > 1
+      ? `${best.sets} x ${best.value} ${pbUnit}`
+      : `${best.value} ${pbUnit}`;
+    return `
+      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md flex flex-col gap-xs">
+        <div class="flex items-center justify-between">
+          <p class="font-label-bold text-label-bold text-on-surface truncate">${escapeHtml(name)}</p>
+          <span class="text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-500/10 px-1.5 py-0.5 rounded-md flex items-center gap-0.5">
+            <span class="material-symbols-outlined text-[12px]">emoji_events</span> PR
+          </span>
+        </div>
+        <p class="font-headline-sm text-headline-sm text-on-background font-bold">${valDisplay}</p>
+        <p class="font-label-sm text-label-sm text-secondary">${dateStr}</p>
+      </div>`;
+  }).join("");
+
+
+  const PROGRESSION_REASONS = {
+    curve: "Gradual increase",
+    hold: "Held steady",
+    reduce: "Reduced",
+    floor: "Kept at the minimum",
+    escalation: "You confirmed a bigger increase",
+    double_progression: "Extra increase for consistent performance",
+    set_created: "Started tracking",
+    set_boost: "Increased after a strong set",
+    pro_level: "Adjusted for your experience level",
+  };
+
+  CACHED_PROGRESSION = d.progression || [];
 
   // Sync the voice-pipeline toggle to the stored per-device preference.
   const elevenlabsToggle = $("elevenlabs-toggle");
@@ -598,7 +1034,9 @@ async function refreshPlayerItems() {
     const existingTypes = new Set(PLAYER_ITEMS.map(i => i.activity_type));
     const added = HOME_ITEMS.filter(i => !existingTypes.has(i.activity_type));
     if (added.length) {
-      PLAYER_ITEMS = PLAYER_ITEMS.concat(added);
+      const currentItem = PLAYER_ITEMS[playerIndex];
+      PLAYER_ITEMS = PLAYER_ITEMS.concat(added).sort((a, b) => (a.priority_order ?? 99) - (b.priority_order ?? 99));
+      playerIndex = Math.max(0, PLAYER_ITEMS.indexOf(currentItem));
       renderPlayerExercise();
     }
   } else {
@@ -609,28 +1047,26 @@ async function refreshPlayerItems() {
 const CUSTOM_TYPE_LABEL = { reps: "Reps", distance: "Distance", duration: "Time" };
 
 function renderCustomCard(c) {
-  // 1-3 measurement types, each picked at creation — every one of them gets
-  // its own Sets/Amount pair here, and Save logs all of them together.
-  const blocks = c.measurement_types.map((mt, i) => {
-    const unit = c.units[i];
-    const single = mt === "distance" || mt === "duration";
-    const amountLabel = mt === "reps" ? "Reps" : `${CUSTOM_TYPE_LABEL[mt]} (${unit})`;
-    return `
+  // One measurement type with a fixed target, set at creation — pre-filled
+  // here exactly like a built-in activity's own default_sets/default_amount;
+  // still editable before logging, same as before.
+  const single = c.measurement_type === "distance" || c.measurement_type === "duration";
+  const amountLabel = c.measurement_type === "reps" ? "Reps" : `${CUSTOM_TYPE_LABEL[c.measurement_type]} (${c.unit})`;
+  const block = `
     <div class="grid grid-cols-2 gap-sm items-stretch">
       <div class="space-y-xs flex flex-col min-w-0">
         <label class="text-label-sm text-secondary truncate block h-4 mb-1">Sets</label>
         ${single
           ? `<div class="bg-surface-container-low rounded-DEFAULT h-10 flex items-center justify-center"><span class="font-body-md text-on-surface-variant text-xs">—</span></div>`
-          : `<input id="cc-sets-${c.id}-${mt}" type="number" min="1" value="1"
+          : `<input id="cc-sets-${c.id}" type="number" min="1" value="${c.target_sets}"
                class="bg-surface-container-low border-none rounded-DEFAULT h-10 text-center font-body-md text-on-surface w-full px-xs">`}
       </div>
       <div class="space-y-xs flex flex-col min-w-0">
         <label class="text-label-sm text-secondary truncate block h-4 mb-1">${amountLabel}</label>
-        <input id="cc-amount-${c.id}-${mt}" type="number" step="any"
+        <input id="cc-amount-${c.id}" type="number" step="any" value="${c.target_amount}"
           class="bg-surface-container-low border-none rounded-DEFAULT h-10 text-center font-body-md text-on-surface w-full px-xs">
       </div>
     </div>`;
-  }).join("");
 
   return `
   <div class="bg-surface-container-lowest ambient-shadow rounded-lg p-md space-y-md flex flex-col">
@@ -647,7 +1083,7 @@ function renderCustomCard(c) {
         <span class="font-body-md text-on-surface text-sm truncate">${escapeHtml(c.name)}</span>
       </div>
     </div>
-    ${blocks}
+    ${block}
     <div class="flex-1"></div>
     <button onclick="logCustomCard('${c.id}')"
       class="w-full ${c.completed_today ? 'bg-surface-container-low text-on-surface-variant' : 'bg-primary text-on-primary'} py-md rounded-full font-label-bold text-label-bold hover:opacity-90">
@@ -659,18 +1095,14 @@ function renderCustomCard(c) {
 async function logCustomCard(id) {
   const c = HOME_CUSTOM_ITEMS.find(x => x.id === id);
   if (!c) return;
-  const entries = [];
-  for (let i = 0; i < c.measurement_types.length; i++) {
-    const mt = c.measurement_types[i], unit = c.units[i];
-    const single = mt === "distance" || mt === "duration";
-    const amount = parseFloat($(`cc-amount-${id}-${mt}`).value);
-    const sets = single ? 1 : (parseInt($(`cc-sets-${id}-${mt}`).value, 10) || 1);
-    if (!amount || amount <= 0) {
-      toast(`Enter a ${CUSTOM_TYPE_LABEL[mt].toLowerCase()} value`, true);
-      return;
-    }
-    entries.push({custom_exercise_id: id, amount, sets, unit});
+  const single = c.measurement_type === "distance" || c.measurement_type === "duration";
+  const amount = parseFloat($(`cc-amount-${id}`).value);
+  const sets = single ? 1 : (parseInt($(`cc-sets-${id}`).value, 10) || 1);
+  if (!amount || amount <= 0) {
+    toast(`Enter a ${CUSTOM_TYPE_LABEL[c.measurement_type].toLowerCase()} value`, true);
+    return;
   }
+  const entries = [{custom_exercise_id: id, amount, sets, unit: c.unit}];
   try {
     const d = await api("POST", "/v1/activities", {entries});
     const anyImplausible = d.logged.some(l => l.implausible);
@@ -1176,16 +1608,21 @@ async function confirmVoiceLog() {
         });
         continue;
       }
+      const sets = e.set_amounts.length;
+      const amount = e.set_amounts.reduce((a, b) => a + b, 0) / sets;
       let customId = existingByName.get(e.activity_name.toLowerCase());
       if (!customId) {
+        // First time this spoken name is seen: there's no explicit
+        // target-setting step in voice logging, so what was just said
+        // becomes the exercise's target going forward — same as any other
+        // custom exercise still needing one of these to exist at all.
         const measurementType = e.unit === "km" ? "distance" : e.unit === "min" ? "duration" : "reps";
         const created = await api("POST", "/v1/custom-exercises", {
-          name: e.activity_name, measurement_types: [measurementType],
+          name: e.activity_name, measurement_type: measurementType,
+          target_amount: amount, target_sets: sets,
         });
         customId = created.id;
       }
-      const sets = e.set_amounts.length;
-      const amount = e.set_amounts.reduce((a, b) => a + b, 0) / sets;
       entries.push({
         custom_exercise_id: customId, amount, sets, unit: e.unit, source: "voice",
       });
@@ -1231,6 +1668,15 @@ let playerRestHandle = null;
 let playerRestRemaining = 0;
 let playerPaused = false;
 let playerPausedAt = null;
+// Set after an exercise is saved; cleared when the soreness question is
+// answered or the next exercise renders. Keeps soreness + rest fully decoupled:
+// the question only appears once the rest period is over, never simultaneously.
+let playerPendingSorenessType = null;
+// Called by dismissSorenessPrompt / reportExerciseSoreness after the user
+// responds. For mid-workout exercises this is () => playerGo(1); for the
+// last exercise it is finishPlayerSession so the done-view only shows AFTER
+// the soreness question is answered — same experience as every other exercise.
+let playerPendingSorenessAction = null;
 
 function formatClock(totalSeconds) {
   const m = Math.floor(totalSeconds / 60), s = Math.max(0, Math.floor(totalSeconds % 60));
@@ -1272,13 +1718,10 @@ function playerTogglePause() {
 }
 
 async function startWorkout() {
-  // Found live: once every exercise was logged, this fell through to
-  // "nothing to do" and left no way to open the player again for the rest
-  // of the day — the one entry point for it (the dumbbell nav icon) is
-  // never hidden now, so this needs a real fallback, not just a dead end. If
-  // nothing's left to do, replay the full program instead of refusing.
-  const todo = HOME_ITEMS.filter(i => !i.completed);
-  const toPlay = todo.length ? todo : HOME_ITEMS;
+  // Always show the full plan, not just what's left — an already-completed
+  // exercise still appears (marked done), so the player reflects the whole
+  // day's plan rather than hiding anything once it's logged.
+  const toPlay = HOME_ITEMS;
   if (!toPlay.length) {
     // Program is completely empty — there is no separate exercise-list
     // screen to point at any more (it moved entirely into this Player), so
@@ -1288,10 +1731,11 @@ async function startWorkout() {
     openCatalogue();
     return;
   }
+  const sorted = toPlay.slice().sort((a, b) => (a.priority_order ?? 99) - (b.priority_order ?? 99));
   try {
     const started = await api("POST", "/v1/workout-sessions",
-      {activity_types: toPlay.map(i => i.activity_type)});
-    PLAYER_ITEMS = toPlay;
+      {activity_types: sorted.map(i => i.activity_type)});
+    PLAYER_ITEMS = sorted;
     playerIndex = 0;
     playerSessionId = started.id;
     playerStartedAt = new Date(started.started_at);
@@ -1309,18 +1753,58 @@ async function startWorkout() {
 // genuinely differ set to set once progression has diverged them — see
 // PER_SET_PROGRESSION_PLAN.md — never assumed uniform).
 let playerSetDone = [];
+let playerDemoFrameTimer = null;
+let playerSetActual = [];
+let playerActualAmount = null;
+
+function playerUseTarget() {
+  const i = PLAYER_ITEMS[playerIndex];
+  if (!i) return;
+  playerActualAmount = i.amount;
+  if ($("pl-distance-input")) $("pl-distance-input").value = (i.amount || 1).toFixed(2);
+  updatePlayerDoneButtonText();
+}
+
+function playerSetDistance(val) {
+  const parsed = parseFloat(val);
+  if (!isNaN(parsed) && parsed >= 0) {
+    playerActualAmount = Math.round(parsed * 100) / 100;
+  }
+  updatePlayerDoneButtonText();
+}
+
+function playerAdjustDistance(delta) {
+  const current = playerActualAmount != null ? playerActualAmount : 0;
+  const next = Math.max(0, Math.round((current + delta) * 100) / 100);
+  playerActualAmount = next;
+  if ($("pl-distance-input")) $("pl-distance-input").value = next.toFixed(2);
+  updatePlayerDoneButtonText();
+}
+
+function updatePlayerDoneButtonText() {
+  const i = PLAYER_ITEMS[playerIndex];
+  if (!i) return;
+  const isDistOrDur = i.prescription_type === "distance" || i.prescription_type === "duration";
+  if (isDistOrDur) {
+    const amt = playerActualAmount != null ? playerActualAmount : 0;
+    $("pl-done-btn").textContent = `Mark Done (${amt.toFixed(2)} ${i.unit || "km"})`;
+  } else {
+    $("pl-done-btn").textContent = "Mark Done";
+  }
+}
 
 function renderPlayerExercise() {
   const total = PLAYER_ITEMS.length;
   const i = PLAYER_ITEMS[playerIndex];
-  $("pl-progress").innerHTML = PLAYER_ITEMS.map((_, idx) =>
+  $("pl-progress").innerHTML = PLAYER_ITEMS.map((item, idx) =>
     `<div class="flex-1 h-full bg-black/10 rounded-full overflow-hidden">
-       <div class="h-full rounded-full bg-primary-fixed transition-all duration-300" style="width:${idx <= playerIndex ? 100 : 0}%"></div>
+       <div class="h-full rounded-full bg-primary-fixed transition-all duration-300" style="width:${idx <= playerIndex || item.completed ? 100 : 0}%"></div>
      </div>`
   ).join("");
   $("pl-counter").textContent = `${playerIndex + 1} of ${total}`;
   $("pl-icon").textContent = icon(i.activity_type);
   $("pl-title").textContent = i.display_name;
+  $("pl-done-badge").classList.toggle("hidden", !i.completed);
   $("pl-prescription").textContent = i.prescription
     + (i.est_minutes ? ` · about ${i.est_minutes} min` : "")
     + (i.rest_seconds ? ` · ${i.rest_seconds}s rest after` : "");
@@ -1332,14 +1816,31 @@ function renderPlayerExercise() {
   const hasDemo = !!(i.demo_gif || (i.demo_images && i.demo_images.length));
   $("pl-video-card").classList.toggle("hidden", !hasDemo);
   if (hasDemo) {
-    $("pl-video-label").textContent = i.display_name;
     $("pl-video-footer-label").textContent = i.display_name;
+    $("pl-video-img").src = assetUrl(i.demo_gif || i.demo_images[0]);
+    // No real animated GIF for this one — alternate its 2 still photos,
+    // same idea as the GIF's own looping, so it isn't just a frozen image.
+    clearInterval(playerDemoFrameTimer);
+    if (!i.demo_gif && i.demo_images && i.demo_images.length > 1) {
+      const frames = i.demo_images.map(assetUrl);
+      let frame = 0;
+      playerDemoFrameTimer = setInterval(() => {
+        frame = 1 - frame;
+        $("pl-video-img").src = frames[frame];
+      }, 900);
+    }
+  } else {
+    clearInterval(playerDemoFrameTimer);
   }
   $("pl-prev").disabled = playerIndex === 0;
   $("pl-next").disabled = playerIndex === total - 1;
   $("pl-rest").classList.add("hidden");
   $("pl-exercise-view").classList.remove("hidden");
   $("pl-done-view").classList.add("hidden");
+  playerPendingSorenessType = null;
+  playerPendingSorenessAction = null;
+  if ($("pl-soreness-prompt")) $("pl-soreness-prompt").classList.add("hidden");
+  if ($("pl-done-soreness-prompt")) $("pl-done-soreness-prompt").classList.add("hidden");
 
   // Single-effort activities (distance/duration — Walking, Running: already
   // locked to exactly 1 "set" server-side) keep the old one-tap button.
@@ -1347,11 +1848,30 @@ function renderPlayerExercise() {
   const singleEffort = i.prescription_type === "distance" || i.prescription_type === "duration";
   $("pl-done-btn").classList.toggle("hidden", !singleEffort);
   $("pl-sets-table").classList.toggle("hidden", singleEffort);
+  $("pl-gps-btn").classList.toggle("hidden", !(i.activity_type === "walk" || i.activity_type === "running"));
+
+  if ($("pl-distance-editor")) {
+    $("pl-distance-editor").classList.toggle("hidden", !singleEffort);
+    if (singleEffort) {
+      if (playerActualAmount == null) {
+        playerActualAmount = 0.0;
+      }
+      if ($("pl-target-val")) $("pl-target-val").textContent = `${i.amount} ${i.unit || "km"}`;
+      if ($("pl-distance-input")) $("pl-distance-input").value = playerActualAmount.toFixed(2);
+      if ($("pl-distance-unit")) $("pl-distance-unit").textContent = i.unit || "km";
+    }
+  }
+
   if (singleEffort) {
     $("pl-done-btn").disabled = false;
-    $("pl-done-btn").textContent = "Mark Done";
+    updatePlayerDoneButtonText();
   } else {
-    playerSetDone = (i.set_targets || Array(i.sets).fill(i.amount)).map(() => false);
+    const targets = i.set_targets || Array(i.sets).fill(i.amount);
+    playerSetDone = targets.map(() => false);
+    // What actually gets logged per set — starts equal to the target, but
+    // editable before marking done, for a set done with more or less than
+    // planned (e.g. only managed 9 of a planned 11 reps).
+    playerSetActual = targets.slice();
     renderSetsTable(i);
   }
 }
@@ -1359,30 +1879,46 @@ function renderPlayerExercise() {
 function renderSetsTable(i) {
   const targets = i.set_targets || Array(i.sets).fill(i.amount);
   const unit = i.prescription_type === "hold" ? "s" : "";
-  // Row shape matches Exercise workout Player.html's own sets table: a
-  // dedicated toggle tile on the left (its tap/slide target) next to a tile
-  // showing that set's own number and target. KG/RPE columns from the
-  // mockup are dropped — this app doesn't track weight or perceived
-  // exertion, and fabricating those fields would show data that was never
-  // actually logged.
+  // Row shape matches Exercise workout Player.html's own sets table: the
+  // tile on the left marks the set done (reading whatever's currently in
+  // that row's own box); the amount itself is always a live editable field,
+  // no separate edit button or mode needed — type a different number
+  // directly, then tap the tile, same single step either way. Locked
+  // (read-only) once marked done, so it can't drift after being logged;
+  // tapping the tile again to un-mark re-enables it.
   $("pl-sets-table").innerHTML = targets.map((target, idx) => {
     const done = playerSetDone[idx];
+    const actual = playerSetActual[idx] ?? target;
     return `
-    <div class="flex items-center gap-1.5 cursor-pointer select-none" onclick="playerToggleSet(${idx})" title="Tap to mark Set ${idx + 1} done">
-      <div class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-sm transition-all
+    <div class="flex items-center gap-1.5 select-none">
+      <div onclick="playerToggleSet(${idx})" title="Tap to mark Set ${idx + 1} done"
+        class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-sm transition-all cursor-pointer
                   ${done ? "bg-primary-fixed" : "bg-white/70 border border-black/10"}">
         <span class="material-symbols-outlined text-[20px] ${done ? "text-on-primary-fixed" : "text-secondary"}">${done ? "check" : "chevron_right"}</span>
       </div>
-      <div class="flex-1 h-11 rounded-xl px-sm flex items-center justify-between shadow-sm border transition-all
+      <div class="flex-1 h-11 rounded-xl pl-sm pr-xs flex items-center justify-between gap-xs shadow-sm border transition-all
                   ${done ? "bg-white/80 border-primary/50" : "bg-white/75 border-black/5"}">
-        <span class="text-xs font-bold text-on-background">Set ${idx + 1}</span>
-        <span class="text-xs font-bold ${done ? "text-primary" : "text-secondary"}">${target}${unit}</span>
+        <span class="text-xs font-bold text-on-background shrink-0">Set ${idx + 1}</span>
+        <div class="flex items-center gap-1">
+          <input type="number" step="any" value="${actual}" ${done ? "disabled" : ""}
+            onchange="updatePlayerSetActual(${idx}, this.value)"
+            class="no-spinner w-14 text-center text-sm font-bold rounded-lg py-1 border-none outline-none
+                   ${done ? "bg-transparent text-primary" : "bg-surface-container-low text-on-background"}">
+          ${unit ? `<span class="text-xs font-bold text-secondary shrink-0">${unit}</span>` : ""}
+        </div>
       </div>
     </div>`;
   }).join("");
 }
 
+function updatePlayerSetActual(idx, value) {
+  const parsed = parseFloat(value);
+  if (!parsed || parsed <= 0) { toast("Enter an amount greater than zero.", true); return; }
+  playerSetActual[idx] = parsed;
+}
+
 function playerToggleSet(idx) {
+  if (!$("pl-rest").classList.contains("hidden")) return;
   playerSetDone[idx] = !playerSetDone[idx];
   const i = PLAYER_ITEMS[playerIndex];
   renderSetsTable(i);
@@ -1392,20 +1928,35 @@ function playerToggleSet(idx) {
 async function playerSubmitSets() {
   const i = PLAYER_ITEMS[playerIndex];
   const targets = i.set_targets || Array(i.sets).fill(i.amount);
-  const result = await send(i.activity_type, null, null, playerSessionId, targets);
+  // Lock the table to all-done immediately so the user can't re-tap a set
+  // and un-mark it while the save is in flight (fixes the double-tap bug).
+  playerSetDone = targets.map(() => true);
+  renderSetsTable(i);
+  // Log what was actually edited per set (defaults to the target for any
+  // set left unedited), not blindly the planned targets.
+  const result = await send(i.activity_type, null, null, playerSessionId, playerSetActual);
   if (!result) {
-    // Logging failed — let the user try again rather than stranding them on
-    // an all-checked table with nothing actually saved.
+    // Save failed — reset table so the user can retry.
     playerSetDone = targets.map(() => false);
     renderSetsTable(i);
     return;
   }
   if (playerIndex === PLAYER_ITEMS.length - 1) {
-    await finishPlayerSession();
+    // Last exercise: show soreness on this page (same UX as every other
+    // exercise), then call finishPlayerSession once user responds.
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = finishPlayerSession;
+    showSorenessPrompt(i.activity_type);
   } else if (i.rest_seconds) {
+    // Has rest: store type + action, show soreness AFTER rest ends.
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = () => playerGo(1);
     playerStartRest(i.rest_seconds);
   } else {
-    playerGo(1);
+    // No rest: show soreness now; dismiss/report handlers will navigate.
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = () => playerGo(1);
+    showSorenessPrompt(i.activity_type);
   }
 }
 
@@ -1413,31 +1964,65 @@ function playerGo(delta) {
   const next = playerIndex + delta;
   if (next < 0 || next >= PLAYER_ITEMS.length) return;
   playerIndex = next;
+  playerActualAmount = null;
   renderPlayerExercise();
 }
 
 async function playerMarkDone() {
   const i = PLAYER_ITEMS[playerIndex];
+  const singleEffort = i.prescription_type === "distance" || i.prescription_type === "duration";
+  const amountToLog = singleEffort ? (playerActualAmount != null ? playerActualAmount : 0) : i.amount;
+
   $("pl-done-btn").disabled = true;
   $("pl-done-btn").textContent = "Saving…";
-  const result = await send(i.activity_type, i.amount, i.sets, playerSessionId);
+
+  // If user didn't move (0.00 km): Mark Done works cleanly and advances without error
+  if (singleEffort && amountToLog <= 0) {
+    toast("Marked done (0.00 km)", false);
+    if (playerIndex === PLAYER_ITEMS.length - 1) {
+      playerPendingSorenessType = i.activity_type;
+      playerPendingSorenessAction = finishPlayerSession;
+      showSorenessPrompt(i.activity_type);
+    } else if (i.rest_seconds) {
+      playerPendingSorenessType = i.activity_type;
+      playerPendingSorenessAction = () => playerGo(1);
+      playerStartRest(i.rest_seconds);
+    } else {
+      playerPendingSorenessType = i.activity_type;
+      playerPendingSorenessAction = () => playerGo(1);
+      showSorenessPrompt(i.activity_type);
+    }
+    return;
+  }
+
+  const result = await send(i.activity_type, amountToLog, i.sets, playerSessionId);
   if (!result) {
     $("pl-done-btn").disabled = false;
-    $("pl-done-btn").textContent = "Mark Done";
+    updatePlayerDoneButtonText();
     return;
   }
   if (playerIndex === PLAYER_ITEMS.length - 1) {
-    await finishPlayerSession();
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = finishPlayerSession;
+    showSorenessPrompt(i.activity_type);
   } else if (i.rest_seconds) {
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = () => playerGo(1);
     playerStartRest(i.rest_seconds);
   } else {
-    playerGo(1);
+    playerPendingSorenessType = i.activity_type;
+    playerPendingSorenessAction = () => playerGo(1);
+    showSorenessPrompt(i.activity_type);
   }
 }
 
 function playerStartRest(seconds) {
   playerRestRemaining = seconds;
   $("pl-rest").classList.remove("hidden");
+  // Do NOT hide pl-sets-table — completed sets stay visible (read-only, since
+  // playerToggleSet already blocks taps while the rest pill is shown) so the
+  // exercise card never looks empty during the rest period.
+  $("pl-done-btn").classList.add("hidden");
   $("pl-rest-counter").textContent = formatClock(playerRestRemaining);
   startRestTicker();
 }
@@ -1450,12 +2035,21 @@ function playerAddRestTime() {
 function playerSkipRest() {
   clearInterval(playerRestHandle);
   $("pl-rest").classList.add("hidden");
-  playerGo(1);
+  if (playerPendingSorenessType) {
+    // Rest is over — NOW show the soreness question.
+    // playerPendingSorenessAction stays set so the dismiss/report handler
+    // knows what to do (go to next exercise or finish the session).
+    showSorenessPrompt(playerPendingSorenessType);
+    playerPendingSorenessType = null;
+  } else {
+    playerGo(1);
+  }
 }
 
 async function finishPlayerSession() {
   clearInterval(playerClockHandle);
   clearInterval(playerRestHandle);
+  clearInterval(playerDemoFrameTimer);
   const sid = playerSessionId;
   // Cleared before the call resolves: a second tap on the close button
   // while this is in flight, or a tap right after it succeeds, must not
@@ -1478,6 +2072,418 @@ async function finishPlayerSession() {
 
 function closePlayer() {
   finishPlayerSession();
+}
+
+let PE_SET_VALUES = [];
+
+function playerEditCurrent() {
+  const i = PLAYER_ITEMS[playerIndex];
+  const single = i.prescription_type === "distance" || i.prescription_type === "duration";
+  $("pe-title").textContent = `Edit ${i.display_name}`;
+  $("pe-sets-wrap").classList.toggle("hidden", single);
+  $("pe-amount-only-wrap").classList.toggle("hidden", !single);
+  if (single) {
+    $("pe-amount-only-label").textContent = `Amount${i.unit ? " (" + i.unit + ")" : ""}`;
+    $("pe-amount-only").value = i.amount;
+  } else {
+    $("pe-amount-label").textContent = `Amount${i.unit ? " (" + i.unit + ")" : ""}`;
+    $("pe-sets").value = i.sets;
+    $("pe-amount").value = i.amount;
+  }
+  $("pe-per-set-toggle-wrap").classList.toggle("hidden", single);
+  $("pe-per-set-toggle-label").textContent =
+    i.prescription_type === "reps" ? "Different reps for each set"
+    : i.prescription_type === "hold" ? "Different hold time for each set"
+    : "Different amount for each set";
+  $("pe-per-set-toggle").checked = false;
+  $("pe-per-set-inputs").classList.add("hidden");
+  $("pe-auto").checked = i.auto_progress !== false;
+  $("pe-auto").disabled = false;
+  $("pe-auto-wrap").classList.remove("opacity-50");
+  $("pl-edit-modal").classList.remove("hidden");
+  $("pl-edit-modal").classList.add("flex");
+}
+
+function closePlayerEditModal() {
+  $("pl-edit-modal").classList.add("hidden");
+  $("pl-edit-modal").classList.remove("flex");
+}
+
+function togglePePerSet() {
+  const on = $("pe-per-set-toggle").checked;
+  $("pe-sets-wrap").classList.toggle("hidden", on);
+  $("pe-per-set-inputs").classList.toggle("hidden", !on);
+  const i = PLAYER_ITEMS[playerIndex];
+  if (on) {
+    const n = Math.max(1, parseInt($("pe-sets").value, 10) || i.sets);
+    PE_SET_VALUES = (i.set_targets && i.set_targets.length === n)
+      ? i.set_targets.slice() : Array.from({length: n}, () => i.amount);
+    renderPePerSetInputs();
+  }
+}
+
+function flushPeSetInputs() {
+  const current = $("pe-per-set-inputs").querySelectorAll("input");
+  current.forEach((el, idx) => { PE_SET_VALUES[idx] = parseFloat(el.value) || PE_SET_VALUES[idx]; });
+}
+
+function renderPePerSetInputs() {
+  $("pe-per-set-inputs").innerHTML = PE_SET_VALUES.map((v, idx) => `
+    <div class="flex items-center justify-between gap-sm">
+      <span class="font-label-bold text-label-bold text-on-surface w-14 shrink-0">Set ${idx + 1}</span>
+      <input type="number" step="any" value="${v}" onchange="updatePeSetValue(${idx}, this.value)"
+        class="flex-1 bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+      ${PE_SET_VALUES.length > 1 ? `
+      <button onclick="removePeSetRow(${idx})" aria-label="Remove set" class="shrink-0 text-secondary hover:text-error">
+        <span class="material-symbols-outlined text-[20px]">close</span>
+      </button>` : `<span class="w-5 shrink-0"></span>`}
+    </div>`).join("")
+    + `<button onclick="addPeSetRow()" class="flex items-center justify-center gap-1 text-primary font-label-bold text-label-bold py-xs">
+         <span class="material-symbols-outlined text-[18px]">add</span> Add Set
+       </button>`;
+}
+
+function updatePeSetValue(idx, value) {
+  PE_SET_VALUES[idx] = parseFloat(value) || 0;
+}
+
+function addPeSetRow() {
+  flushPeSetInputs();
+  PE_SET_VALUES.push(PE_SET_VALUES[PE_SET_VALUES.length - 1]);
+  renderPePerSetInputs();
+}
+
+function removePeSetRow(idx) {
+  flushPeSetInputs();
+  PE_SET_VALUES.splice(idx, 1);
+  renderPePerSetInputs();
+}
+
+async function submitPlayerEdit() {
+  const i = PLAYER_ITEMS[playerIndex];
+  const single = i.prescription_type === "distance" || i.prescription_type === "duration";
+  const perSet = !single && $("pe-per-set-toggle").checked;
+  let sets, amount, setAmounts;
+  if (perSet) {
+    flushPeSetInputs();
+    setAmounts = PE_SET_VALUES.slice();
+    if (!setAmounts.length || setAmounts.some(v => !v || v <= 0)) {
+      toast("Enter an amount greater than zero for every set.", true);
+      return;
+    }
+  } else {
+    sets = single ? 1 : parseInt($("pe-sets").value, 10);
+    amount = parseFloat(single ? $("pe-amount-only").value : $("pe-amount").value);
+    if (!single && (!Number.isFinite(sets) || sets < 1)) { toast("Enter a valid number of sets", true); return; }
+    if (!Number.isFinite(amount) || amount <= 0) { toast("Enter a valid amount", true); return; }
+  }
+  const autoProgress = $("pe-auto").checked;
+  try {
+    const body = perSet
+      ? { set_amounts: setAmounts, auto_progress: autoProgress }
+      : { target_sets: sets, target_amount: amount, auto_progress: autoProgress };
+    const r = await api("PUT", `/v1/program/entries/${i.activity_type}/target`, body);
+    i.sets = r.target_sets;
+    i.amount = r.target_amount;
+    i.set_targets = r.set_targets || null;
+    i.auto_progress = r.auto_progress;
+    i.prescription = single ? `${r.target_amount} ${i.unit || ""}`.trim()
+                             : `${r.target_sets} x ${r.target_amount}${i.unit ? " " + i.unit : ""}`;
+    closePlayerEditModal();
+    renderPlayerExercise();
+    toast("Updated");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function playerRemoveCurrent() {
+  const i = PLAYER_ITEMS[playerIndex];
+  if (!confirm(`Remove ${i.display_name} from today's plan?`)) return;
+  try {
+    await api("DELETE", `/v1/program/entries/${i.activity_type}`);
+  } catch (e) { toast(e.message, true); return; }
+  PLAYER_ITEMS.splice(playerIndex, 1);
+  if (!PLAYER_ITEMS.length) { await finishPlayerSession(); return; }
+  if (playerIndex >= PLAYER_ITEMS.length) playerIndex = PLAYER_ITEMS.length - 1;
+  renderPlayerExercise();
+  toast("Removed");
+}
+
+// ── outdoor GPS run/walk tracker — third logging method alongside the
+// guided Workout Player and voice. Reuses the same workout_sessions
+// start/finish the Player already uses; the final distance logs through the
+// normal /v1/activities path with source="gps". No route is saved anywhere
+// (v1 scope: live tracking only, no route history) and there is no claim of
+// background tracking — both iOS and (often) Android suspend a web page's
+// location updates once it's no longer the foreground tab, so this only
+// works reliably with the screen on and the tab in front. ──
+let gpsActivityType = null;
+let gpsWatchId = null;
+let gpsMap = null;
+let gpsPolyline = null;
+let gpsSessionId = null;
+let gpsStartedAt = null;
+let gpsClockHandle = null;
+let gpsDistanceKm = 0;
+let gpsLastFix = null; // {lat, lon, t} of the last ACCEPTED fix
+let gpsPlayerLinked = false; // started from the Workout Player, not the Dashboard shortcut
+
+// Real-world GPS fixes jitter even when stationary, and the error is worse
+// than the jitter once you try to tell "walked 3m" from "GPS drifted 3m"
+// apart with a fixed cutoff — especially at walking speed. Instead: reject a
+// fix outright if the device itself reports poor confidence, then reject a
+// fix if the IMPLIED speed since the last accepted fix is physically
+// implausible for a foot-powered activity (a GPS jump, not real movement).
+const GPS_MAX_ACCURACY_M = 30;
+const GPS_MAX_PLAUSIBLE_KMH = 25; // generous ceiling above even a fast sprint
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function openGpsTracker() {
+  gpsPlayerLinked = false;
+  gpsActivityType = null;
+  gpsDistanceKm = 0;
+  gpsLastFix = null;
+  $("gps-pick-walk").className = "py-md rounded-xl border-2 border-outline-variant/40 font-label-bold text-label-bold text-on-surface";
+  $("gps-pick-running").className = "py-md rounded-xl border-2 border-outline-variant/40 font-label-bold text-label-bold text-on-surface";
+  $("gps-start-btn").disabled = true;
+  $("gps-setup").classList.remove("hidden");
+  $("gps-active").classList.add("hidden");
+  go("gps");
+}
+
+// Reached from the Workout Player's "Track with GPS instead" button, only
+// shown for the current exercise when it's Walking/Running (renderPlayerExercise).
+// Logs against the PLAYER's own already-active session instead of starting a
+// second one — this is the same workout, just measured with real GPS distance
+// instead of the player's one-tap "Mark Done".
+function openGpsTrackerForPlayer() {
+  const i = PLAYER_ITEMS[playerIndex];
+  gpsPlayerLinked = true;
+  gpsActivityType = i.activity_type;
+  gpsSessionId = playerSessionId;
+  gpsDistanceKm = 0;
+  gpsLastFix = null;
+  $("gps-setup").classList.add("hidden");
+  $("gps-active").classList.remove("hidden");
+  go("gps");
+  beginGpsWatch();
+}
+
+function closeGpsTracker() {
+  if (gpsWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null;
+    if (gpsClockHandle) { clearInterval(gpsClockHandle); gpsClockHandle = null; }
+    if (!gpsPlayerLinked) {
+      // Leaving mid-track without hitting Finish — stop watching and abandon
+      // the session server-side rather than leave it dangling as "active"
+      // forever (same self-healing concept start_workout_session already
+      // relies on, just triggered immediately instead of on the next start).
+      if (gpsSessionId) api("POST", `/v1/workout-sessions/${gpsSessionId}/finish`, {}).catch(() => {});
+    }
+  }
+  if (gpsPlayerLinked) {
+    playerActualAmount = Math.round(gpsDistanceKm * 100) / 100;
+  }
+  go(gpsPlayerLinked ? "player" : "home");
+  if (gpsPlayerLinked) {
+    renderPlayerExercise();
+  }
+}
+
+function selectGpsActivity(type) {
+  gpsActivityType = type;
+  $("gps-pick-walk").className = `py-md rounded-xl border-2 font-label-bold text-label-bold ${type === "walk" ? "border-primary bg-primary-fixed/20 text-on-primary-fixed-variant" : "border-outline-variant/40 text-on-surface"}`;
+  $("gps-pick-running").className = `py-md rounded-xl border-2 font-label-bold text-label-bold ${type === "running" ? "border-primary bg-primary-fixed/20 text-on-primary-fixed-variant" : "border-outline-variant/40 text-on-surface"}`;
+  $("gps-start-btn").disabled = false;
+}
+
+async function startGpsTracking() {
+  if (!gpsActivityType) return;
+  if (!navigator.geolocation) {
+    toast("This device/browser doesn't support location tracking.", true);
+    return;
+  }
+  try {
+    const started = await api("POST", "/v1/workout-sessions", {activity_types: [gpsActivityType]});
+    gpsSessionId = started.id;
+    $("gps-setup").classList.add("hidden");
+    $("gps-active").classList.remove("hidden");
+    beginGpsWatch();
+  } catch (e) { toast(e.message, true); }
+}
+
+// Shared by both entry points (Dashboard shortcut, once its own session is
+// started above; Workout Player, whose session already exists by the time
+// this is called) — everything from here on is identical either way.
+function beginGpsWatch() {
+  gpsStartedAt = new Date();
+  gpsDistanceKm = 0;
+  gpsLastFix = null;
+  $("gps-distance").textContent = "0.00";
+  $("gps-duration").textContent = "00:00";
+  $("gps-pace").textContent = "--";
+  $("gps-signal-note").textContent = "Finding your GPS signal…";
+
+  setTimeout(() => {
+    if (!gpsMap) {
+      gpsMap = L.map("gps-map");
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: "© OpenStreetMap",
+      }).addTo(gpsMap);
+      gpsPolyline = L.polyline([], {color: "#2563eb", weight: 4}).addTo(gpsMap);
+    }
+    gpsMap.hasLaidFirstView = false;
+    gpsPolyline.setLatLngs([]);
+    gpsMap.invalidateSize();
+  }, 50);
+
+  gpsClockHandle = setInterval(updateGpsClock, 1000);
+  gpsWatchId = navigator.geolocation.watchPosition(onGpsPosition, onGpsError, {
+    enableHighAccuracy: true, maximumAge: 2000, timeout: 15000,
+  });
+}
+
+function onGpsError(err) {
+  $("gps-signal-note").textContent = err.code === err.PERMISSION_DENIED
+    ? "Location permission denied — enable it in your phone's settings to keep tracking."
+    : "Waiting for a GPS signal…";
+}
+
+function onGpsPosition(pos) {
+  const {latitude: lat, longitude: lon, accuracy} = pos.coords;
+  const t = pos.timestamp;
+
+  if (!gpsMap.hasLaidFirstView) {
+    gpsMap.setView([lat, lon], 17);
+    gpsMap.hasLaidFirstView = true;
+  }
+  L.circleMarker([lat, lon], {radius: 5, color: "#2563eb"}).addTo(gpsMap);
+
+  if (accuracy > GPS_MAX_ACCURACY_M) {
+    $("gps-signal-note").textContent = "Weak GPS signal — move to open sky for a better reading.";
+    return;
+  }
+
+  if (gpsLastFix) {
+    const segKm = haversineKm(gpsLastFix.lat, gpsLastFix.lon, lat, lon);
+    const dtHours = (t - gpsLastFix.t) / 3_600_000;
+    const impliedKmh = dtHours > 0 ? segKm / dtHours : 0;
+    if (impliedKmh > GPS_MAX_PLAUSIBLE_KMH) {
+      // A physically impossible jump -- GPS noise, not real movement.
+      // Keep this fix as the new reference point without adding its
+      // distance, so a genuine one-off glitch doesn't poison every
+      // subsequent segment's speed calculation too.
+      gpsLastFix = {lat, lon, t};
+      return;
+    }
+    gpsDistanceKm += segKm;
+    gpsPolyline.addLatLng([lat, lon]);
+    gpsMap.panTo([lat, lon]);
+  } else {
+    gpsPolyline.addLatLng([lat, lon]);
+  }
+  gpsLastFix = {lat, lon, t};
+  $("gps-signal-note").textContent = "";
+  $("gps-distance").textContent = gpsDistanceKm.toFixed(2);
+  updateGpsPace();
+}
+
+function updateGpsClock() {
+  const elapsed = Math.floor((Date.now() - gpsStartedAt.getTime()) / 1000);
+  const m = String(Math.floor(elapsed / 60)).padStart(2, "0");
+  const s = String(elapsed % 60).padStart(2, "0");
+  $("gps-duration").textContent = `${m}:${s}`;
+  updateGpsPace();
+}
+
+function updateGpsPace() {
+  if (gpsDistanceKm < 0.05) { $("gps-pace").textContent = "--"; return; }
+  const elapsedMin = (Date.now() - gpsStartedAt.getTime()) / 60000;
+  const paceMinPerKm = elapsedMin / gpsDistanceKm;
+  const m = Math.floor(paceMinPerKm);
+  const s = String(Math.round((paceMinPerKm - m) * 60)).padStart(2, "0");
+  $("gps-pace").textContent = `${m}:${s}`;
+}
+
+async function finishGpsTracking() {
+  if (gpsWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null;
+  }
+  if (gpsClockHandle) { clearInterval(gpsClockHandle); gpsClockHandle = null; }
+
+  if (gpsPlayerLinked) {
+    // When linked to Workout Player: NO automatic completion!
+    // Bring the exact real GPS distance back to the player card so the user
+    // can review it, do extra if they want, and explicitly click "Mark Done"!
+    playerActualAmount = Math.round(gpsDistanceKm * 100) / 100;
+    go("player");
+    renderPlayerExercise();
+    toast(`GPS recorded ${playerActualAmount.toFixed(2)} km. Review and tap Mark Done to save.`);
+    return;
+  }
+
+  if (gpsDistanceKm <= 0) {
+    // Standalone GPS tracking on desktop/indoor: let the user enter a
+    // manual distance via the popup instead of a native prompt().
+    const actLabel = gpsActivityType === "running" ? "run" : "walk";
+    $("gm-message").textContent = `GPS recorded 0.00 km. Enter the distance to log this ${actLabel}, or discard it.`;
+    $("gm-distance").value = "1.0";
+    $("gps-manual-modal").classList.remove("hidden");
+    $("gps-manual-modal").classList.add("flex");
+    return;
+  }
+  await saveGpsActivity();
+}
+
+async function discardGpsManualDistance() {
+  $("gps-manual-modal").classList.add("hidden");
+  $("gps-manual-modal").classList.remove("flex");
+  if (gpsSessionId) {
+    await api("POST", `/v1/workout-sessions/${gpsSessionId}/finish`, {}).catch(() => {});
+  }
+  toast("Stopped — activity discarded.");
+  go("home");
+}
+
+async function submitGpsManualDistance() {
+  const parsed = parseFloat($("gm-distance").value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    toast("Enter a distance greater than zero.", true);
+    return;
+  }
+  gpsDistanceKm = parsed;
+  $("gps-manual-modal").classList.add("hidden");
+  $("gps-manual-modal").classList.remove("flex");
+  await saveGpsActivity();
+}
+
+async function saveGpsActivity() {
+  try {
+    const d = await api("POST", "/v1/activities", {
+      entries: [{
+        activity_type: gpsActivityType, amount: Math.round(gpsDistanceKm * 100) / 100,
+        sets: 1, unit: "km", source: "gps", workout_session_id: gpsSessionId,
+      }],
+    });
+    const anyImplausible = d.logged.some(l => l.implausible);
+    toast(anyImplausible
+      ? "Saved — that distance looks unusual, so it won't count towards progress"
+      : `Saved · ${gpsDistanceKm.toFixed(2)} km logged`, anyImplausible);
+    await api("POST", `/v1/workout-sessions/${gpsSessionId}/finish`, {});
+  } catch (e) {
+    toast(e.message, true);
+  }
+  go("home");
+  loadHome();
 }
 
 // ── manual program control (14.7): add from the catalogue, remove any entry ──
@@ -1513,11 +2519,12 @@ async function openCatalogue() {
         <h4 class="font-label-bold text-label-bold text-on-surface">${c.display_name}</h4>
         ${c.caution ? `<p class="font-label-sm text-label-sm ${c.verdict === 'avoid' ? 'text-error' : 'text-on-surface-variant'}">${c.verdict === 'avoid' ? '⚠ ' : ''}${c.caution}</p>` : ""}
       </div>
-      <button onclick="addFromCatalogue('${c.activity_type}')"
+      <button onclick="openCatalogueAddEditor('${c.activity_type}')"
         class="shrink-0 ${c.verdict === 'avoid' ? 'bg-error-container text-on-error-container' : 'bg-primary text-on-primary'} px-md py-xs rounded-full font-label-bold text-label-bold hover:opacity-90">
         ${c.verdict === 'avoid' ? 'Blocked — add anyway' : 'Add'}</button>
     </div>`).join("")
     : `<p class="font-body-md text-on-surface-variant text-center py-lg">Everything is already on your dashboard.</p>`;
+  CATALOGUE_CACHE = catalogue;
   const m = $("catalogue-modal");
   m.classList.remove("hidden");
   m.classList.add("flex");
@@ -1529,18 +2536,155 @@ function closeCatalogue() {
   m.classList.remove("flex");
 }
 
-async function addFromCatalogue(activityType, overrideConfirmed) {
+let CATALOGUE_CACHE = [];
+let CA_CURRENT_ACTIVITY = null;
+
+// Shows editable defaults before adding, and the same fixed-vs-auto-upgrade
+// choice a manager already gets for someone else's plan — a self-service
+// user gets it for their own now too, instead of silently always getting
+// the taxonomy default locked to auto-progress with no say in it.
+function openCatalogueAddEditor(activityType) {
+  const c = CATALOGUE_CACHE.find(x => x.activity_type === activityType);
+  if (!c) return;
+  CA_CURRENT_ACTIVITY = activityType;
+  const single = c.prescription_type === "distance" || c.prescription_type === "duration";
+  $("ca-title").textContent = `Add ${c.display_name}`;
+  $("ca-sets-wrap").classList.toggle("hidden", single);
+  $("ca-sets").value = c.default_sets;
+  // amount_unit is "count" for reps internally — show "Reps" to the user
+  // instead of that raw unit name, same convention the sets table elsewhere
+  // in this file already uses for a reps-type exercise.
+  $("ca-amount-label").textContent =
+    c.prescription_type === "reps" ? "Reps per set"
+    : c.prescription_type === "hold" ? `Hold (${c.amount_unit}) per set`
+    : `Amount (${c.amount_unit})`;
+  $("ca-amount").value = c.default_amount;
+  $("ca-auto").checked = true;
+  $("ca-auto").disabled = false;
+  $("ca-auto-wrap").classList.remove("opacity-50");
+  // Different-amount-per-set only makes sense for reps/hold exercises (a
+  // single distance/duration effort has no "sets" to vary) — see
+  // set_own_target's docstring in app/profile/service.py.
+  $("ca-per-set-toggle-wrap").classList.toggle("hidden", single);
+  $("ca-per-set-toggle-label").textContent =
+    c.prescription_type === "reps" ? "Different reps for each set"
+    : c.prescription_type === "hold" ? "Different hold time for each set"
+    : "Different amount for each set";
+  $("ca-per-set-toggle").checked = false;
+  $("ca-uniform-wrap").classList.remove("hidden");
+  $("ca-per-set-inputs").classList.add("hidden");
+  const m = $("catalogue-add-modal");
+  m.classList.remove("hidden");
+  m.classList.add("flex");
+}
+
+function closeCatalogueAddEditor() {
+  const m = $("catalogue-add-modal");
+  m.classList.add("hidden");
+  m.classList.remove("flex");
+}
+
+// Per-set mode keeps its own row count independent of the (hidden, while
+// this is on) uniform "Sets" field — the number of sets IS what's being
+// edited here, via Add/Remove Set rather than a separate numeric input.
+let CA_SET_VALUES = [];
+
+function toggleCaPerSet() {
+  const on = $("ca-per-set-toggle").checked;
+  $("ca-uniform-wrap").classList.toggle("hidden", on);
+  $("ca-per-set-inputs").classList.toggle("hidden", !on);
+  const c = CATALOGUE_CACHE.find(x => x.activity_type === CA_CURRENT_ACTIVITY);
+  if (on) {
+    const n = Math.max(1, parseInt($("ca-sets").value, 10) || c.default_sets);
+    CA_SET_VALUES = Array.from({length: n}, () => c.default_amount);
+    renderCaPerSetInputs();
+  }
+}
+
+// Reads whatever's currently typed in the DOM into CA_SET_VALUES, without
+// re-rendering. Must run BEFORE a splice/push, never after — reading the
+// (still old-length) DOM post-splice would write a stale value straight
+// back into the index that was just removed, undoing the removal.
+function flushCaSetInputs() {
+  const current = $("ca-per-set-inputs").querySelectorAll("input");
+  current.forEach((el, idx) => { CA_SET_VALUES[idx] = parseFloat(el.value) || CA_SET_VALUES[idx]; });
+}
+
+function renderCaPerSetInputs() {
+  $("ca-per-set-inputs").innerHTML = CA_SET_VALUES.map((v, idx) => `
+    <div class="flex items-center justify-between gap-sm">
+      <span class="font-label-bold text-label-bold text-on-surface w-14 shrink-0">Set ${idx + 1}</span>
+      <input type="number" step="any" value="${v}" onchange="updateCaSetValue(${idx}, this.value)"
+        class="flex-1 bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+      ${CA_SET_VALUES.length > 1 ? `
+      <button onclick="removeCaSetRow(${idx})" aria-label="Remove set" class="shrink-0 text-secondary hover:text-error">
+        <span class="material-symbols-outlined text-[20px]">close</span>
+      </button>` : `<span class="w-5 shrink-0"></span>`}
+    </div>`).join("")
+    + `<button onclick="addCaSetRow()" class="flex items-center justify-center gap-1 text-primary font-label-bold text-label-bold py-xs">
+         <span class="material-symbols-outlined text-[18px]">add</span> Add Set
+       </button>`;
+}
+
+function updateCaSetValue(idx, value) {
+  CA_SET_VALUES[idx] = parseFloat(value) || 0;
+}
+
+function addCaSetRow() {
+  flushCaSetInputs();
+  CA_SET_VALUES.push(CA_SET_VALUES[CA_SET_VALUES.length - 1]);
+  renderCaPerSetInputs();
+}
+
+function removeCaSetRow(idx) {
+  flushCaSetInputs();
+  CA_SET_VALUES.splice(idx, 1);
+  renderCaPerSetInputs();
+}
+
+async function submitCatalogueAdd() {
+  const c = CATALOGUE_CACHE.find(x => x.activity_type === CA_CURRENT_ACTIVITY);
+  if (!c) return;
+  const single = c.prescription_type === "distance" || c.prescription_type === "duration";
+  const perSet = !single && $("ca-per-set-toggle").checked;
+
+  let sets, amount, setAmounts;
+  if (perSet) {
+    flushCaSetInputs(); // pick up any just-typed value still sitting in the DOM
+    setAmounts = CA_SET_VALUES.slice();
+    if (!setAmounts.length || setAmounts.some(v => !v || v <= 0)) {
+      toast("Enter an amount greater than zero for every set.", true);
+      return;
+    }
+  } else {
+    sets = single ? 1 : (parseInt($("ca-sets").value, 10) || c.default_sets);
+    amount = parseFloat($("ca-amount").value);
+    if (!amount || amount <= 0) { toast("Enter an amount greater than zero.", true); return; }
+  }
+  await addFromCatalogue(CA_CURRENT_ACTIVITY, false, sets, amount, $("ca-auto").checked, setAmounts);
+}
+
+async function addFromCatalogue(activityType, overrideConfirmed, sets, amount, autoProgress, setAmounts) {
   try {
-    const d = await api("POST", "/v1/program/entries",
-      { activity_type: activityType, override_confirmed: !!overrideConfirmed });
+    const d = await api("POST", "/v1/program/entries", {
+      activity_type: activityType, override_confirmed: !!overrideConfirmed,
+      auto_progress: autoProgress !== false,
+    });
     if (d.needs_confirmation) {
       const ok = confirm(
         d.warning_text + "\n\nClick OK only if a doctor has advised you to do this. " +
         "Click Cancel to keep it blocked."
       );
-      if (ok) await addFromCatalogue(activityType, true);
+      if (ok) await addFromCatalogue(activityType, true, sets, amount, autoProgress, setAmounts);
       return;
     }
+    if (setAmounts !== undefined) {
+      await api("PUT", `/v1/program/entries/${activityType}/target`, { set_amounts: setAmounts });
+    } else if (sets !== undefined && amount !== undefined) {
+      await api("PUT", `/v1/program/entries/${activityType}/target`,
+        { target_sets: sets, target_amount: amount });
+    }
+    closeCatalogueAddEditor();
     closeCatalogue();
     toast("Added to your plan");
     await refreshPlayerItems();
@@ -1622,7 +2766,7 @@ async function saveProfileEditor() {
     if (d.referred) {
       $("refer-msg").textContent = d.message;
       go("refer");
-      $("nav").className = NAV_ON;
+      $("nav").className = navOnClass();
       return;
     }
     await loadProfile();
@@ -1645,12 +2789,14 @@ let pwForgotMode = false;
 function openPasswordEditor() {
   $("pw-current").value = "";
   $("pw-new").value = "";
+  if ($("pw-confirm")) $("pw-confirm").value = "";
   $("pw-reset-code").value = "";
   $("pw-err").className = "hidden";
   pwForgotMode = false;
   $("pw-current-wrap").classList.remove("hidden");
   $("pw-reset-wrap").classList.add("hidden");
   $("pw-forgot-link").textContent = "Forgot your password?";
+  checkPasswordRules("pw-new", "pw-confirm", "p");
   const m = $("pw-modal");
   m.classList.remove("hidden");
   m.classList.add("flex");
@@ -1663,29 +2809,37 @@ function closePasswordEditor() {
 }
 
 function toggleForgotPassword() {
-  // Email delivery isn't wired up yet (the backend mailer is a stub that
-  // silently drops every email in production) — this used to call the real
-  // /password-reset/request endpoint and tell the user "a reset code was
-  // sent," which was worse than saying nothing: the code was real, but it
-  // went nowhere, and the user would wait for an email that could never
-  // arrive. Until real email exists, be honest and point at the manual
-  // path instead of pretending this works.
-  $("pw-err").textContent =
-    "Password reset by email isn't available yet. Please contact us and we'll reset it for you.";
-  $("pw-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs";
+  closePasswordEditor();
+  openForgotPasswordModal();
 }
 
 async function savePassword() {
+  const newPass = $("pw-new")?.value || "";
+  const confPass = $("pw-confirm")?.value || "";
+
+  if (!pwForgotMode && newPass !== confPass) {
+    $("pw-err").textContent = "New passwords do not match. Please re-enter.";
+    $("pw-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs text-xs";
+    return;
+  }
+
+  const rules = checkPasswordRules("pw-new", "pw-confirm", "p");
+  if (!rules.length || !rules.upper || !rules.lower || !rules.number || !rules.special) {
+    $("pw-err").textContent = "Password must have at least 1 capital letter, 1 small letter, 1 number, 1 special character, and be at least 10 characters long.";
+    $("pw-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs text-xs";
+    return;
+  }
+
   try {
     if (pwForgotMode) {
       await api("POST", "/v1/auth/password-reset/confirm", {
         token: $("pw-reset-code").value.trim(),
-        password: $("pw-new").value,
+        password: newPass,
       });
     } else {
       await api("POST", "/v1/auth/change-password", {
         current_password: $("pw-current").value,
-        new_password: $("pw-new").value,
+        new_password: newPass,
       });
     }
     closePasswordEditor();
@@ -1693,11 +2847,12 @@ async function savePassword() {
     // change) - the current session is dead now too, so return to login.
     localStorage.clear();
     AT = null; RT = null;
+    setAuthMode("login");
     go("auth");
     toast("Password updated — please log in again");
   } catch (e) {
     $("pw-err").textContent = e.message;
-    $("pw-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs";
+    $("pw-err").className = "font-body-md text-on-error-container bg-error-container rounded px-sm py-xs text-xs";
   }
 }
 
@@ -1739,48 +2894,48 @@ function closeDemo() {
 
 // ── videos ──
 async function loadVideos() {
-  const d = await api("GET", "/v1/videos");
-  if (d.referred) {
-    $("v-list").innerHTML = `<div class="bg-surface-container-lowest ambient-shadow rounded-lg p-lg font-body-md text-on-surface-variant">${d.message}</div>`;
-    return;
-  }
-  $("v-list").innerHTML = d.videos.map(v => {
-    const hasGif = !!v.demo_gif;
-    const hasDemo = v.demo_images && v.demo_images.length;
-    return `
+  // YouTube-curated Video Library removed for now (product decision) — see
+  // index.html's s-videos screen. Browse Exercises (ExerciseDB) is the only
+  // thing this screen shows today.
+  loadExerciseBrowse();
+}
+
+// ── exercise browse (ExerciseDB reference library, separate from the plan's
+// curated video_library above) ──
+let EXERCISE_BROWSE_CACHE = [];
+async function loadExerciseBrowse() {
+  const d = await api("GET", "/v1/exercise-library");
+  EXERCISE_BROWSE_CACHE = d.exercises || [];
+  renderExerciseBrowse();
+}
+
+function renderExerciseBrowse() {
+  const q = ($("vb-search")?.value || "").trim().toLowerCase();
+  const items = q
+    ? EXERCISE_BROWSE_CACHE.filter(e =>
+        e.name.toLowerCase().includes(q) ||
+        (e.body_part || "").toLowerCase().includes(q) ||
+        (e.target || "").toLowerCase().includes(q) ||
+        (e.equipment || "").toLowerCase().includes(q))
+    : EXERCISE_BROWSE_CACHE;
+  $("vb-grid").innerHTML = items.slice(0, 60).map(e => `
     <article class="bg-surface-container-lowest rounded-lg p-3 ambient-shadow flex flex-col gap-sm">
       <div class="relative w-full aspect-video rounded-[14px] overflow-hidden bg-surface-container-low">
-        ${hasGif
-          ? `<img src="${assetUrl(v.demo_gif)}" alt="${v.display_name}" class="w-full h-full object-contain">`
-          : hasDemo
-          ? `<img id="demo-${v.activity_type}" src="${assetUrl(v.demo_images[0])}" alt="${v.display_name}"
-                  class="w-full h-full object-contain">
-             <span class="absolute bottom-2 right-2 bg-inverse-surface/80 text-inverse-on-surface font-label-sm text-label-sm px-2 py-1 rounded backdrop-blur-sm">
-               ${v.demo_images.length} frames</span>`
-          : `<div class="w-full h-full flex flex-col items-center justify-center gap-xs">
-               <span class="material-symbols-outlined text-[40px] text-on-surface-variant">directions_walk</span>
-               <span class="font-label-sm text-label-sm text-on-surface-variant">No demonstration needed</span>
-             </div>`}
+        <img src="${assetUrl(e.gif_url)}" alt="${e.name}" class="w-full h-full object-contain" loading="lazy">
       </div>
       <div class="px-1 flex flex-col gap-2">
         <div class="flex gap-2 flex-wrap">
-          <span class="px-2 py-1 bg-primary-fixed/20 text-on-primary-fixed-variant font-label-sm text-label-sm rounded-full">${v.prescription_type}</span>
-          ${v.per_side ? '<span class="px-2 py-1 bg-surface-variant text-on-surface-variant font-label-sm text-label-sm rounded-full">each side</span>' : ''}
+          ${e.body_part ? `<span class="px-2 py-1 bg-primary-fixed/20 text-on-primary-fixed-variant font-label-sm text-label-sm rounded-full">${e.body_part}</span>` : ""}
+          ${e.target ? `<span class="px-2 py-1 bg-surface-variant text-on-surface-variant font-label-sm text-label-sm rounded-full">${e.target}</span>` : ""}
+          ${e.equipment ? `<span class="px-2 py-1 bg-surface-variant text-on-surface-variant font-label-sm text-label-sm rounded-full">${e.equipment}</span>` : ""}
         </div>
-        <h3 class="font-headline-sm text-headline-sm">${v.display_name}</h3>
-        ${v.instructions && v.instructions.length ? `
+        <h3 class="font-headline-sm text-headline-sm">${e.name}</h3>
+        ${e.instructions && e.instructions.length ? `
           <ol class="font-body-md text-body-md text-on-surface-variant list-decimal pl-5 space-y-1">
-            ${v.instructions.map(i => `<li>${i}</li>`).join("")}
+            ${e.instructions.map(i => `<li>${i}</li>`).join("")}
           </ol>` : ""}
-        ${v.watch_url ? `<a href="${v.watch_url}" target="_blank" class="inline-flex items-center gap-1 text-primary font-label-bold text-label-bold mt-1">
-            Watch on YouTube <span class="material-symbols-outlined text-[16px]">open_in_new</span></a>` : ""}
       </div>
-    </article>`;}).join("");
-
-  // Alternate the start/end frames — this IS the animation. Two static images
-  // looping beats hosting a GIF: smaller, already public domain, and it stops
-  // when the tab is hidden so it costs nothing in the background.
-  startDemoLoop(d.videos);
+    </article>`).join("") || `<p class="font-body-md text-on-surface-variant">No matches.</p>`;
 }
 
 let demoTimer = null;
@@ -2171,24 +3326,345 @@ async function loadProfile() {
           <p class="text-[11px] font-semibold text-secondary">Security settings</p>
         </div>
       </div>
+      ${p.is_managed_account ? "" : `
       <button onclick="go('relationships')" class="flex items-center justify-between py-sm text-left border-t border-black/5">
         <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">supervisor_account</span> Manage Plans for Others</span>
+        <span class="material-symbols-outlined text-secondary">chevron_right</span>
+      </button>`}
+      <button onclick="openActivityLogHistory()" class="flex items-center justify-between py-sm text-left border-t border-black/5">
+        <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">history</span> Activity Log History</span>
+        <span class="material-symbols-outlined text-secondary">chevron_right</span>
+      </button>
+      <button onclick="openTargetChangesHistory()" class="flex items-center justify-between py-sm text-left border-t border-black/5">
+        <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">trending_up</span> Recent Target Changes</span>
         <span class="material-symbols-outlined text-secondary">chevron_right</span>
       </button>
       <button onclick="openPasswordEditor()" class="flex items-center justify-between py-sm text-left border-t border-black/5">
         <span class="flex items-center gap-sm font-body-lg text-body-lg text-on-background"><span class="material-symbols-outlined text-[20px] text-secondary">lock_reset</span> Change Password</span>
         <span class="material-symbols-outlined text-secondary">chevron_right</span>
       </button>
+      ${p.is_managed_account ? "" : `
       <button onclick="doLogout()" class="flex items-center justify-between py-sm text-left border-t border-black/5">
         <span class="flex items-center gap-sm font-body-lg text-body-lg text-primary font-semibold"><span class="material-symbols-outlined text-[20px]">logout</span> Log out</span>
         <span class="material-symbols-outlined text-secondary">chevron_right</span>
-      </button>
+      </button>`}
     </section>
 
-    <!-- Danger Zone — centered red pill, matching the mockup exactly. -->
+    <!-- Danger Zone — centered red pill, matching the mockup exactly.
+         Hidden for a managed account: only whoever created the invite link
+         can delete it (server-enforced too, not just hidden here — see
+         app/auth/service.py's delete_account). -->
+    ${p.is_managed_account ? "" : `
     <button onclick="delAccount()" class="flex items-center justify-center gap-xs mx-auto mt-sm px-lg py-sm rounded-full text-error font-label-bold text-label-bold hover:bg-error-container/40 transition-colors">
       <span class="material-symbols-outlined text-[18px]">delete_forever</span> Delete Account
-    </button>`;
+    </button>`}`;
+}
+
+async function openActivityLogHistory() {
+  const { entries } = await api("GET", "/v1/dashboard/activity-detail?days=90");
+  $("activity-history-list").innerHTML = entries.length
+    ? entries.map(e => `
+      <div class="flex items-center justify-between bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md">
+        <div>
+          <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.name)}</p>
+          <p class="font-label-sm text-label-sm text-secondary">${e.date}</p>
+        </div>
+        <p class="font-label-bold text-label-bold text-on-background">${e.set_amounts ? e.set_amounts.join(", ") : `${e.sets} x ${e.amount}`} ${escapeHtml(e.unit)}</p>
+      </div>`).join("")
+    : `<p class="font-body-md text-on-surface-variant text-center py-lg">No activity logged in the last 90 days.</p>`;
+  go("activity-history");
+}
+
+function getProgressionDetails(item) {
+  const isUp = item.pct > 0.05;
+  const isDown = item.pct < -0.05;
+  const isFlat = !isUp && !isDown;
+  const adh = item.adherence != null ? Math.round(item.adherence) : null;
+  const absPct = Math.abs(item.pct).toFixed(1);
+  const unitStr = item.unit ? ` ${item.unit}` : "";
+
+  let reasonTitle = "";
+  let reasonDesc = "";
+  let badgeText = "";
+  let badgeClass = "";
+  let iconName = "";
+  let whyBoxBg = "";
+  let whyIcon = "";
+  let whyIconColor = "";
+  let whyTitleColor = "";
+  let whyTextColor = "";
+
+  if (isUp) {
+    badgeText = `+${absPct}% Growth`;
+    badgeClass = "bg-emerald-500/15 text-emerald-800 border-emerald-500/30";
+    iconName = "trending_up";
+    whyBoxBg = "bg-emerald-50/70 border-emerald-200/60";
+    whyIcon = "trending_up";
+    whyIconColor = "text-emerald-600";
+    whyTitleColor = "text-emerald-900";
+    whyTextColor = "text-emerald-950/80";
+
+    if (item.reason === "double_progression") {
+      reasonTitle = "Consistency Bonus Step-Up";
+      reasonDesc = `Target stepped up by <strong>+${absPct}%</strong> (from ${item.old_target}${unitStr} to ${item.new_target}${unitStr}) because you consistently completed all required sets and reps.`;
+    } else if (item.reason === "escalation") {
+      reasonTitle = "Chat-Confirmed Target Increase";
+      reasonDesc = `Target increased by <strong>+${absPct}%</strong> to ${item.new_target}${unitStr} following your confirmed goal adjustment during coaching chat.`;
+    } else if (item.reason === "set_boost") {
+      reasonTitle = "Workout Performance Boost";
+      reasonDesc = `Target boosted by <strong>+${absPct}%</strong> to ${item.new_target}${unitStr} after an exceptional workout session.`;
+    } else if (item.reason === "pro_level") {
+      reasonTitle = "Experience Level Adjustment";
+      reasonDesc = `Target increased by <strong>+${absPct}%</strong> to align with your updated fitness experience band.`;
+    } else {
+      const adhText = adh != null ? `your weekly adherence reached <strong>${adh}%</strong> (exceeding the 80% progression goal)` : "of strong and consistent weekly workout adherence";
+      reasonTitle = `Target Increased (+${absPct}% Overload)`;
+      reasonDesc = `Target grew by <strong>+${absPct}%</strong> (from ${item.old_target}${unitStr} to ${item.new_target}${unitStr}) because ${adhText}. Progressive overload safely advances your fitness.`;
+    }
+  } else if (isDown) {
+    badgeText = `-${absPct}% Reduction`;
+    badgeClass = "bg-rose-500/15 text-rose-800 border-rose-500/30";
+    iconName = "trending_down";
+    whyBoxBg = "bg-rose-50/70 border-rose-200/60";
+    whyIcon = "healing";
+    whyIconColor = "text-rose-600";
+    whyTitleColor = "text-rose-900";
+    whyTextColor = "text-rose-950/80";
+
+    if (item.reason === "deload") {
+      reasonTitle = "Scheduled Recovery Deload";
+      reasonDesc = `Target temporarily reduced by <strong>-${absPct}%</strong> to ${item.new_target}${unitStr} to give muscles and connective tissue time to recover.`;
+    } else if (item.reason === "floor") {
+      reasonTitle = "Adjusted to Safe Baseline Minimum";
+      reasonDesc = `Target was lowered by <strong>-${absPct}%</strong> to ${item.new_target}${unitStr}, reaching the safe foundational floor for this exercise.`;
+    } else {
+      const adhText = adh != null ? `weekly adherence was <strong>${adh}%</strong> (below the 50% target threshold)` : "recent consistency was lower than expected";
+      reasonTitle = `Target Reduced (-${absPct}%) for Recovery`;
+      reasonDesc = `Target was safely reduced by <strong>-${absPct}%</strong> (from ${item.old_target}${unitStr} to ${item.new_target}${unitStr}) because ${adhText}. Reducing volume prevents injury and fatigue, making workouts manageable again.`;
+    }
+  } else {
+    badgeText = "0.0% Maintained";
+    badgeClass = "bg-slate-500/10 text-slate-700 border-slate-500/20";
+    iconName = "pause_circle";
+    whyBoxBg = "bg-slate-50 border-slate-200/60";
+    whyIcon = "balance";
+    whyIconColor = "text-slate-600";
+    whyTitleColor = "text-slate-900";
+    whyTextColor = "text-slate-950/80";
+
+    if (item.reason === "floor") {
+      reasonTitle = "Maintained at Safe Minimum Baseline";
+      reasonDesc = `Target kept steady at <strong>${item.new_target}${unitStr}</strong>. This is the safe foundational minimum — it will not decrease further to ensure you maintain core fitness benefits.`;
+    } else if (item.reason === "set_created") {
+      reasonTitle = "Baseline Target Established";
+      reasonDesc = `Started tracking with a baseline target of <strong>${item.new_target}${unitStr}</strong>.`;
+    } else {
+      const adhText = adh != null ? `weekly adherence was <strong>${adh}%</strong> (in the 50%–79% maintenance range)` : "consistency is currently in the steady maintenance zone";
+      reasonTitle = "Target Maintained Steady";
+      reasonDesc = `Target held steady at <strong>${item.new_target}${unitStr}</strong> because ${adhText}. Maintaining steady volume builds habit stability before the next increase.`;
+    }
+  }
+
+  let adherenceBadge = "";
+  if (adh != null) {
+    if (adh >= 80) {
+      adherenceBadge = `<span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">High (≥80%)</span>`;
+    } else if (adh >= 50) {
+      adherenceBadge = `<span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">Moderate (50-79%)</span>`;
+    } else {
+      adherenceBadge = `<span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">Low (&lt;50%)</span>`;
+    }
+  }
+
+  return {
+    reasonTitle,
+    reasonDesc,
+    badgeText,
+    badgeClass,
+    iconName,
+    whyBoxBg,
+    whyIcon,
+    whyIconColor,
+    whyTitleColor,
+    whyTextColor,
+    adherenceBadge,
+    isUp,
+    isDown,
+    isFlat,
+  };
+}
+
+function filterTargetChangesHistory(filter) {
+  CURRENT_TARGET_FILTER = filter;
+  renderTargetChangesHistory();
+}
+
+function renderTargetChangesHistory() {
+  const container = $("target-history-list");
+  const filtersContainer = $("target-history-filters");
+  if (!container) return;
+
+  const upCount = ALL_TARGET_CHANGES.filter(i => i.pct > 0.05).length;
+  const downCount = ALL_TARGET_CHANGES.filter(i => i.pct < -0.05).length;
+  const flatCount = ALL_TARGET_CHANGES.filter(i => i.pct >= -0.05 && i.pct <= 0.05).length;
+  const totalCount = ALL_TARGET_CHANGES.length;
+
+  if (filtersContainer) {
+    const filters = [
+      { id: "all", label: "All", count: totalCount, icon: "list" },
+      { id: "growth", label: "Growth", count: upCount, icon: "trending_up", activeColor: "text-emerald-700 bg-emerald-500/10 border-emerald-500/30" },
+      { id: "reduce", label: "Recovery", count: downCount, icon: "trending_down", activeColor: "text-rose-700 bg-rose-500/10 border-rose-500/30" },
+      { id: "steady", label: "Maintained", count: flatCount, icon: "pause_circle", activeColor: "text-slate-700 bg-slate-500/10 border-slate-500/30" },
+    ];
+    filtersContainer.innerHTML = filters.map(f => {
+      const isActive = CURRENT_TARGET_FILTER === f.id;
+      const activeClass = isActive
+        ? (f.activeColor || "bg-primary text-white font-bold shadow-xs")
+        : "bg-white/70 text-secondary hover:bg-white border-black/5";
+      return `
+        <button onclick="filterTargetChangesHistory('${f.id}')"
+          class="px-2.5 py-1 rounded-full text-[11px] font-semibold border flex items-center gap-1 transition-all shrink-0 ${activeClass}">
+          <span class="material-symbols-outlined text-[13px]">${f.icon}</span>
+          ${f.label} (${f.count})
+        </button>`;
+    }).join("");
+  }
+
+  let filtered = ALL_TARGET_CHANGES;
+  if (CURRENT_TARGET_FILTER === "growth") {
+    filtered = ALL_TARGET_CHANGES.filter(i => i.pct > 0.05);
+  } else if (CURRENT_TARGET_FILTER === "reduce") {
+    filtered = ALL_TARGET_CHANGES.filter(i => i.pct < -0.05);
+  } else if (CURRENT_TARGET_FILTER === "steady") {
+    filtered = ALL_TARGET_CHANGES.filter(i => i.pct >= -0.05 && i.pct <= 0.05);
+  }
+
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg text-center flex flex-col items-center gap-2">
+        <span class="material-symbols-outlined text-secondary/40 text-[36px]">event_note</span>
+        <p class="font-headline-sm text-headline-sm text-on-background font-bold">No Changes in this Category</p>
+        <p class="font-body-md text-secondary text-[12px] max-w-xs">
+          ${ALL_TARGET_CHANGES.length ? "Try selecting another filter above to view your target history." : "Complete your active workouts this week, and your targets will automatically adjust based on your consistency and recovery!"}
+        </p>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.map(item => {
+    const details = getProgressionDetails(item);
+    const exerciseIcon = icon(item.activity_type);
+
+    return `
+      <div class="bg-white/85 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md flex flex-col gap-sm hover:shadow-md transition-shadow">
+        <!-- Header row -->
+        <div class="flex items-start justify-between gap-sm">
+          <div class="flex items-center gap-sm">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-black/[0.03] border border-black/5 shrink-0">
+              <span class="material-symbols-outlined text-[22px] text-primary">${exerciseIcon}</span>
+            </div>
+            <div>
+              <p class="font-body-lg text-body-lg text-on-background font-bold">${escapeHtml(item.display_name)}</p>
+              <p class="text-[11px] font-medium text-secondary">
+                ${item.date ? item.date : "Recent Evaluation"} · <span class="capitalize">${escapeHtml(item.reason_raw || item.reason_label || "Weekly review")}</span>
+              </p>
+            </div>
+          </div>
+          <!-- Growth Percentage Pill -->
+          <div class="flex flex-col items-end gap-1 shrink-0">
+            <span class="text-[12px] font-black px-2.5 py-1 rounded-full border flex items-center gap-1 ${details.badgeClass}">
+              <span class="material-symbols-outlined text-[15px] font-bold">${details.iconName}</span>
+              ${details.badgeText}
+            </span>
+          </div>
+        </div>
+
+        <!-- Target Comparison: Old Target -> New Target -->
+        <div class="bg-black/[0.025] rounded-xl p-sm border border-black/5 flex items-center justify-between">
+          <div class="flex flex-col">
+            <span class="text-[10px] uppercase font-bold tracking-wider text-secondary">Previous Target</span>
+            <span class="font-headline-sm text-[15px] font-bold text-on-background">${item.old_target} ${escapeHtml(item.unit)}</span>
+          </div>
+          <div class="flex items-center gap-1 text-secondary/60">
+            <span class="material-symbols-outlined text-[18px]">trending_flat</span>
+          </div>
+          <div class="flex flex-col items-end text-right">
+            <span class="text-[10px] uppercase font-bold tracking-wider text-secondary">New Target</span>
+            <span class="font-headline-sm text-[15px] font-black ${details.isUp ? 'text-emerald-700' : details.isDown ? 'text-rose-700' : 'text-primary'}">${item.new_target} ${escapeHtml(item.unit)}</span>
+          </div>
+        </div>
+
+        <!-- Why This Changed: Explanation Block -->
+        <div class="rounded-xl p-sm border ${details.whyBoxBg}">
+          <div class="flex items-center gap-1.5 mb-1">
+            <span class="material-symbols-outlined text-[16px] ${details.whyIconColor}">${details.whyIcon}</span>
+            <span class="text-[12px] font-bold ${details.whyTitleColor}">${escapeHtml(details.reasonTitle)}</span>
+          </div>
+          <p class="text-[11.5px] leading-relaxed ${details.whyTextColor}">
+            ${details.reasonDesc}
+          </p>
+        </div>
+
+        <!-- Metrics Row: Adherence & Date -->
+        <div class="flex items-center justify-between pt-1 border-t border-black/5 text-[11px] text-secondary">
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <span class="material-symbols-outlined text-[14px]">tune</span>
+            <span>Adherence: <strong class="text-on-background">${item.adherence != null ? `${Math.round(item.adherence)}%` : 'N/A'}</strong></span>
+            ${details.adherenceBadge}
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <span class="material-symbols-outlined text-[14px]">calendar_today</span>
+            <span>${item.date}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+async function openTargetChangesHistory() {
+  let progression = CACHED_PROGRESSION;
+  if (!progression || !progression.length) {
+    try {
+      const d = await api("GET", "/v1/dashboard/summary");
+      progression = d.progression || [];
+      CACHED_PROGRESSION = progression;
+    } catch {}
+  }
+
+  ALL_TARGET_CHANGES = [];
+  (progression || []).forEach(act => {
+    (act.points || []).forEach(pt => {
+      const oldVal = parseFloat(pt.old_target) || 0;
+      const newVal = parseFloat(pt.new_target) || 0;
+      const unit = pt.unit || act.unit || TAX_UNIT_LOOKUP[act.activity_type] || "";
+      let pct = 0;
+      if (oldVal > 0) {
+        pct = ((newVal - oldVal) / oldVal) * 100;
+      } else if (newVal > 0) {
+        pct = 100;
+      }
+
+      ALL_TARGET_CHANGES.push({
+        activity_type: act.activity_type,
+        display_name: act.display_name || act.activity_type,
+        unit: unit,
+        old_target: pt.old_target,
+        new_target: pt.new_target,
+        pct: pct,
+        reason: pt.reason,
+        reason_raw: pt.reason,
+        adherence: pt.adherence_pct != null ? parseFloat(pt.adherence_pct) : null,
+        curve_pct: pt.curve_pct != null ? parseFloat(pt.curve_pct) : null,
+        date: pt.applied_at ? new Date(pt.applied_at).toLocaleDateString() : "",
+        timestamp: pt.applied_at ? new Date(pt.applied_at).getTime() : 0,
+      });
+    });
+  });
+
+  ALL_TARGET_CHANGES.sort((a, b) => b.timestamp - a.timestamp);
+  CURRENT_TARGET_FILTER = "all";
+  renderTargetChangesHistory();
+  go("target-history");
 }
 
 async function doLogout() {
@@ -2234,39 +3710,80 @@ let PENDING_INVITE_TOKEN = new URLSearchParams(location.search).get("invite")
   || sessionStorage.getItem("pendingInvite") || null;
 if (PENDING_INVITE_TOKEN) sessionStorage.setItem("pendingInvite", PENDING_INVITE_TOKEN);
 
-async function claimPendingInviteIfAny() {
-  if (!PENDING_INVITE_TOKEN) return;
+// The actual mechanism confirmed in conversation: the managed person never
+// signs up or logs in — opening the link itself grants access. This calls
+// /v1/relationships/open directly (no auth needed, the token IS the
+// credential) and stores the real token pair it returns, exactly as a normal
+// login would. Returns true if it actually opened something, so the
+// bootstrap IIFE below knows to skip the normal "no token -> show auth
+// screen" check entirely.
+async function openPendingInviteIfAny() {
+  if (!PENDING_INVITE_TOKEN) return false;
   const token = PENDING_INVITE_TOKEN;
   sessionStorage.removeItem("pendingInvite");
   PENDING_INVITE_TOKEN = null;
   try {
-    await api("POST", "/v1/relationships/claim", {invite_token: token});
-    toast("You're linked — they can now see and help manage your plan.");
+    const d = await api("POST", "/v1/relationships/open", {invite_token: token});
+    AT = d.access_token; RT = d.refresh_token;
+    localStorage.setItem("at", AT); localStorage.setItem("rt", RT);
+    return true;
   } catch (e) {
-    toast(e.message || "That invite link didn't work.", true);
+    toast(e.message || "That link didn't work — it may have been revoked.", true);
+    return false;
   }
 }
 
+let RELATIONSHIPS_CACHE = [];
+
 async function loadRelationships() {
   const { relationships } = await api("GET", "/v1/relationships");
-  $("rel-list").innerHTML = relationships.length ? relationships.map(r => {
+  RELATIONSHIPS_CACHE = relationships;
+  const revokedCount = relationships.filter(r => r.status === "revoked").length;
+
+  if (!relationships.length) {
+    $("rel-list").innerHTML = `<p class="font-body-md text-on-surface-variant text-center py-lg">You're not managing anyone's plan yet. Tap "New" to invite a child, student, or patient.</p>`;
+    return;
+  }
+
+  const itemsHtml = relationships.map(r => {
+    const isRevoked = r.status === "revoked";
     const openFn = r.status === "active" ? `openRelationshipDetail('${r.id}')`
       : r.status === "pending" ? `openPendingBuild('${r.id}', '${r.invite_token}')` : null;
     const clickable = openFn ? `cursor-pointer" onclick="${openFn}` : "";
+    const rawName = r.name || RELATION_LABELS[r.relation_type] || r.relation_type;
+    const displayName = escapeHtml(rawName);
+    const safeName = rawName.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
     return `
     <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md flex items-center gap-sm">
-      <div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container shrink-0 ${clickable}">
+      <div class="w-10 h-10 rounded-full ${isRevoked ? 'bg-black/5 text-secondary' : 'bg-primary-container text-on-primary-container'} flex items-center justify-center shrink-0 ${clickable}">
         <span class="material-symbols-outlined">${RELATION_ICONS[r.relation_type] || 'person'}</span>
       </div>
       <div class="flex-1 min-w-0 ${clickable}">
-        <h4 class="font-label-bold text-label-bold text-on-surface">${RELATION_LABELS[r.relation_type] || r.relation_type}</h4>
-        <p class="font-label-sm text-label-sm text-secondary">${r.status === 'pending' ? 'Not accepted yet — tap to set up their plan' : r.status === 'revoked' ? 'Revoked' : 'Active'}</p>
+        <h4 class="font-label-bold text-label-bold ${isRevoked ? 'text-secondary/70' : 'text-on-surface'}">${displayName}</h4>
+        <p class="font-label-sm text-label-sm text-secondary">${RELATION_LABELS[r.relation_type] || r.relation_type} · ${r.status === 'pending' ? 'Not accepted yet — tap to set up their plan' : isRevoked ? 'Revoked' : 'Active'}</p>
       </div>
-      ${r.status === 'pending' ? `<button onclick="event.stopPropagation(); copyInviteLink('${r.invite_token}')" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold">Copy link</button>` : ''}
-      ${r.status !== 'revoked' ? `<button onclick="event.stopPropagation(); revokeRelationship('${r.id}')" aria-label="Revoke" class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>` : ''}
+      ${r.status === 'pending' ? `<button type="button" onclick="event.stopPropagation(); copyInviteLink('${r.invite_token}')" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold hover:opacity-95 active:scale-95 transition-all">Copy link</button>` : ''}
+      ${!isRevoked ? `
+        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptRevokeRelationship('${r.id}', '${safeName}', '${r.status}')" title="${r.status === 'pending' ? 'Cancel invite' : 'Revoke plan'}" aria-label="Revoke" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
+          <span class="material-symbols-outlined text-[22px] pointer-events-none">close</span>
+        </button>
+      ` : `
+        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptDeleteRelationship('${r.id}', '${safeName}')" title="Remove from list" aria-label="Remove" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary/60 hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
+          <span class="material-symbols-outlined text-[20px] pointer-events-none">delete_outline</span>
+        </button>
+      `}
     </div>`;
-  }).join("")
-    : `<p class="font-body-md text-on-surface-variant text-center py-lg">You're not managing anyone's plan yet. Tap "New" to invite a child, student, or patient.</p>`;
+  }).join("");
+
+  const clearBar = revokedCount > 0 ? `
+    <div class="pt-2 text-center">
+      <button type="button" onclick="clearAllRevokedPlans()" class="text-xs font-semibold text-secondary hover:text-error transition-colors px-3 py-1.5 rounded-full hover:bg-error/5 cursor-pointer">
+        Clear all revoked plans (${revokedCount})
+      </button>
+    </div>` : "";
+
+  $("rel-list").innerHTML = itemsHtml + clearBar;
 }
 
 function copyInviteLink(token) {
@@ -2282,6 +3799,7 @@ function copyInviteLink(token) {
 }
 
 function openCreateInviteModal() {
+  $("invite-name").value = "";
   const m = $("invite-modal"); m.classList.remove("hidden"); m.classList.add("flex");
 }
 function closeCreateInviteModal() {
@@ -2289,50 +3807,211 @@ function closeCreateInviteModal() {
 }
 
 async function createRelationshipInvite(relationType) {
+  const name = $("invite-name").value.trim();
+  if (!name) { toast("Enter their name first.", true); return; }
   try {
-    const r = await api("POST", "/v1/relationships", {relation_type: relationType});
+    const r = await api("POST", "/v1/relationships", {relation_type: relationType, name});
     closeCreateInviteModal();
     // Build the plan FIRST, get the link after — so the moment it's
     // claimed, the person sees it already set up instead of an empty
     // account waiting on a second trip back from the manager.
-    openPendingBuild(r.id, r.invite_token);
+    openPendingBuild(r.id, r.invite_token, r.name);
   } catch (e) { toast(e.message, true); }
 }
 
 let CURRENT_INVITE_TOKEN = null;
+let CURRENT_RELATIONSHIP_NAME = "";
 
-async function openPendingBuild(relationshipId, inviteToken) {
+async function openPendingBuild(relationshipId, inviteToken, name, preloaded) {
   CURRENT_RELATIONSHIP = relationshipId;
   CURRENT_IS_PENDING = true;
   CURRENT_INVITE_TOKEN = inviteToken;
+  // Passed directly when called right after creating a new invite (real JS
+  // value, no quoting risk); looked up from the roster when reopening an
+  // existing pending one from an inline onclick, which can't safely carry
+  // arbitrary manager-typed text itself.
+  const cached = preloaded || RELATIONSHIPS_CACHE.find(r => r.id === relationshipId) || {};
+  CURRENT_RELATIONSHIP_NAME = name || cached.name || "";
   CURRENT_MANAGED_USER_ID = null;
+  // Every time the plan is opened, the info step comes first (pre-filled
+  // with whatever was saved before) -- confirmed product behaviour: saving
+  // it (even unchanged) is what moves the manager into the activities step,
+  // not a one-time setup that's then skipped on later visits.
+  PENDING_PROFILE_CONDITIONS = new Set(cached.pending_condition_codes || []);
+  PENDING_PROFILE_AGE = cached.pending_age || 1;
+  PENDING_PROFILE_BAND = cached.pending_experience_band || "beginner";
+  PENDING_STEP = "profile";
   await renderPendingBuild();
   go("relationship-detail");
 }
 
+let PENDING_PROFILE_CONDITIONS = new Set();
+let PENDING_PROFILE_AGE = 1;
+let PENDING_PROFILE_BAND = "beginner";
+let PENDING_STEP = "profile"; // "profile" | "activities"
+
 async function renderPendingBuild() {
-  const { entries } = await api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`);
-  $("rd-title").textContent = "Set Up Their Plan";
-  const entriesHtml = entries.length ? entries.map(e => `
+  $("rd-title").textContent = CURRENT_RELATIONSHIP_NAME
+    ? `Set Up ${CURRENT_RELATIONSHIP_NAME}'s Plan` : "Set Up Their Plan";
+
+  if (PENDING_STEP === "profile") {
+    // Asked of the MANAGER, never the managed person. Only actually matters
+    // if at least one activity ends up set to auto-update (needed for the
+    // safety grid); left blank for an all-fixed plan, where it's simply
+    // never used. Shown every time the plan is opened, pre-filled with
+    // whatever was saved before -- Save is what moves on to Activities.
+    const { conditions } = await api("GET", "/v1/conditions");
+    $("rd-body").innerHTML = `
+      <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-sm">
+        <h3 class="font-headline-sm text-headline-sm text-on-background">A couple of questions about them</h3>
+        <p class="font-label-sm text-label-sm text-secondary -mt-1">Only needed if you set any activity to auto-update — the app uses this to keep it safe for them. Leave it if everything will be fixed.</p>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Their age</label>
+          <input id="pp-age" type="number" min="1" value="${PENDING_PROFILE_AGE}"
+            class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
+        </div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Health conditions</label>
+          <div id="pp-conditions" class="flex flex-wrap gap-xs mt-xs">
+            ${conditions.map(c => `
+              <button type="button" onclick="togglePendingCondition('${c.code}')"
+                class="pp-cond-chip px-md py-sm rounded-full font-label-sm text-label-sm border transition-colors ${PENDING_PROFILE_CONDITIONS.has(c.code) ? 'bg-primary-fixed/20 border-primary-fixed text-on-primary-fixed-variant' : 'bg-surface-container border-outline-variant text-on-surface-variant'}"
+                data-code="${c.code}">${escapeHtml(c.name)}${c.bucket === 'refer' ? ' ⚠' : ''}</button>
+            `).join("")}
+          </div>
+        </div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Their exercise experience</label>
+          <p class="font-label-sm text-label-sm text-secondary -mt-1 mb-1">Used to size the suggested starting numbers below — more experience, a bigger starting point.</p>
+          <select id="pp-band" class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
+            ${BANDS.map(([v, l]) => `<option value="${v}" ${PENDING_PROFILE_BAND === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+        <button onclick="savePendingProfile()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Save &amp; Continue</button>
+      </section>`;
+    return;
+  }
+
+  const [{ entries }, { exercises: customEntries }, { suggestions }] = await Promise.all([
+    api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`),
+    api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-custom-exercises`),
+    api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/suggested-exercises`),
+  ]);
+  PENDING_SUGGESTIONS_CACHE = suggestions;
+  const suggestionsHtml = renderSuggestionsSection(suggestions);
+  const entriesHtml = entries.map(e => {
+    const isDist = e.activity_type === "walk" || e.activity_type === "running";
+    const targetDesc = isDist ? `${e.target_amount} km` : `${e.target_sets} x ${e.target_amount}`;
+    return `
     <div class="flex items-center justify-between py-sm border-t border-black/5">
       <div class="min-w-0">
         <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
-        <p class="font-label-sm text-label-sm text-secondary">${e.target_sets} x ${e.target_amount} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
+        <p class="font-label-sm text-label-sm text-secondary">${targetDesc} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
       </div>
       <button onclick="removePendingEntry('${e.activity_type}')" aria-label="Remove"
         class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>
-    </div>`).join("")
-    : `<p class="font-body-md text-on-surface-variant py-sm">Add at least one activity, then share the link — they'll see this plan the moment they sign up.</p>`;
+    </div>`;
+  }).join("");
+  const customHtml = customEntries.map(e => `
+    <div class="flex items-center justify-between py-sm border-t border-black/5">
+      <div class="min-w-0">
+        <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.name)}</p>
+        <p class="font-label-sm text-label-sm text-secondary">Custom · ${e.target_sets ? `${e.target_sets} x ${e.target_amount}` : e.target_amount} ${e.measurement_type}</p>
+      </div>
+      <button onclick="removePendingCustomExercise('${e.id}')" aria-label="Remove"
+        class="shrink-0 text-secondary hover:text-error"><span class="material-symbols-outlined text-[20px]">close</span></button>
+    </div>`).join("");
+  const combinedHtml = entriesHtml + customHtml || `<p class="font-body-md text-on-surface-variant py-sm">Add at least one activity, then share the link — they'll see this plan the moment they open it.</p>`;
 
   $("rd-body").innerHTML = `
+    <button onclick="editPendingProfile()" class="self-start flex items-center gap-1 text-secondary font-label-bold text-label-bold mb-sm">
+      <span class="material-symbols-outlined text-[18px]">edit</span> Edit their info
+    </button>
+    ${suggestionsHtml}
     <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
       <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Activities</h3>
-      ${entriesHtml}
+      ${combinedHtml}
     </section>
     <button onclick="copyInviteLink('${CURRENT_INVITE_TOKEN}')"
       class="bg-primary text-on-primary rounded-full py-md font-label-bold text-label-bold flex items-center justify-center gap-xs">
       <span class="material-symbols-outlined text-[18px]">link</span> Get the Link to Share
     </button>`;
+}
+
+const RANK_LABEL = ["Best Pick", "2nd Best", "3rd Best", "4th Best", "5th Best"];
+let PENDING_SUGGESTIONS_CACHE = [];
+async function acceptSuggestedExercise(activityType) {
+  const s = PENDING_SUGGESTIONS_CACHE.find(x => x.activity_type === activityType);
+  if (!s) return;
+  const single = s.prescription_type === "distance" || s.prescription_type === "duration";
+  const sets = single ? 1 : (parseInt($(`sg-sets-${activityType}`).value, 10) || 1);
+  const amount = parseFloat($(`sg-amount-${activityType}`).value);
+  if (!amount || amount <= 0) { toast("Enter an amount greater than zero.", true); return; }
+  try {
+    if (CURRENT_IS_PENDING) {
+      const d = await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`, {
+        activity_type: activityType, target_sets: sets, target_amount: amount, auto_progress: true,
+      });
+      if (d.needs_confirmation) {
+        toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
+        return;
+      }
+      toast("Added to their plan");
+      await renderPendingBuild();
+      return;
+    }
+    // Active relationship: same two-step add_program_entry + set target
+    // pattern submitManagedAdd already uses for a manual add.
+    const d = await api("POST", "/v1/program/entries", {
+      activity_type: activityType, managed_user_id: CURRENT_MANAGED_USER_ID, auto_progress: true,
+    });
+    if (d.needs_confirmation) {
+      toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
+      return;
+    }
+    await api("PUT", `/v1/program/entries/${activityType}/target`, {
+      managed_user_id: CURRENT_MANAGED_USER_ID, target_sets: sets, target_amount: amount,
+    });
+    toast("Added to their plan");
+    await openRelationshipDetail(CURRENT_RELATIONSHIP);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removePendingCustomExercise(id) {
+  try {
+    await api("DELETE", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-custom-exercises/${id}`);
+    await renderPendingBuild();
+  } catch (e) { toast(e.message, true); }
+}
+
+function editPendingProfile() {
+  PENDING_STEP = "profile";
+  renderPendingBuild();
+}
+
+function togglePendingCondition(code) {
+  if (PENDING_PROFILE_CONDITIONS.has(code)) PENDING_PROFILE_CONDITIONS.delete(code);
+  else PENDING_PROFILE_CONDITIONS.add(code);
+  document.querySelectorAll(".pp-cond-chip").forEach(btn => {
+    const on = PENDING_PROFILE_CONDITIONS.has(btn.dataset.code);
+    btn.className = `pp-cond-chip px-md py-sm rounded-full font-label-sm text-label-sm border transition-colors ${on ? 'bg-primary-fixed/20 border-primary-fixed text-on-primary-fixed-variant' : 'bg-surface-container border-outline-variant text-on-surface-variant'}`;
+  });
+}
+
+async function savePendingProfile() {
+  const age = parseInt($("pp-age").value, 10);
+  if (!age || age < 1) { toast("Enter a real age.", true); return; }
+  const band = $("pp-band").value;
+  try {
+    await api("PUT", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-profile`, {
+      age, condition_codes: [...PENDING_PROFILE_CONDITIONS], experience_band: band,
+    });
+    PENDING_PROFILE_AGE = age; // so it stays filled in if reopened later
+    PENDING_PROFILE_BAND = band;
+    PENDING_STEP = "activities";
+    toast("Saved");
+    await renderPendingBuild();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function removePendingEntry(activityType) {
@@ -2342,12 +4021,90 @@ async function removePendingEntry(activityType) {
   } catch (e) { toast(e.message, true); }
 }
 
+let PENDING_REVOKE_ID = null;
+let PENDING_REVOKE_HARD = false;
+
+function promptRevokeRelationship(id, name, status) {
+  PENDING_REVOKE_ID = id;
+  PENDING_REVOKE_HARD = false;
+  const m = $("revoke-rel-modal");
+  if (!m) {
+    revokeRelationship(id);
+    return;
+  }
+  const cleanName = name || "this person";
+  if (status === "pending") {
+    $("revoke-modal-title").textContent = `Cancel Invite for ${cleanName}?`;
+    $("revoke-modal-desc").textContent = `This invite link will be cancelled and will no longer work.`;
+    $("revoke-modal-confirm-btn").textContent = "Cancel Invite";
+    $("revoke-modal-icon").textContent = "cancel";
+  } else {
+    $("revoke-modal-title").textContent = `Stop Managing ${cleanName}'s Plan?`;
+    $("revoke-modal-desc").textContent = `They keep all their current activities and history — you just won't be able to see or edit their plan anymore.`;
+    $("revoke-modal-confirm-btn").textContent = "Revoke Plan";
+    $("revoke-modal-icon").textContent = "person_remove";
+  }
+  m.classList.remove("hidden");
+  m.classList.add("flex");
+}
+
+function promptDeleteRelationship(id, name) {
+  PENDING_REVOKE_ID = id;
+  PENDING_REVOKE_HARD = true;
+  const m = $("revoke-rel-modal");
+  if (!m) return;
+  const cleanName = name || "this entry";
+  $("revoke-modal-title").textContent = `Remove ${cleanName} from list?`;
+  $("revoke-modal-desc").textContent = `This plan has already been revoked. Removing it clears this card from your list.`;
+  $("revoke-modal-confirm-btn").textContent = "Remove";
+  $("revoke-modal-icon").textContent = "delete";
+  m.classList.remove("hidden");
+  m.classList.add("flex");
+}
+
+function closeRevokeModal() {
+  const m = $("revoke-rel-modal");
+  if (m) {
+    m.classList.add("hidden");
+    m.classList.remove("flex");
+  }
+  PENDING_REVOKE_ID = null;
+  PENDING_REVOKE_HARD = false;
+}
+
+async function executeRevokeRelationship() {
+  const id = PENDING_REVOKE_ID;
+  const hard = PENDING_REVOKE_HARD;
+  if (!id) return;
+  closeRevokeModal();
+  try {
+    const url = hard ? `/v1/relationships/${id}?delete=true` : `/v1/relationships/${id}`;
+    await api("DELETE", url);
+    toast(hard ? "Removed from list" : "Plan revoked");
+    await loadRelationships();
+  } catch (e) {
+    toast(e.message || "Failed to update plan", true);
+  }
+}
+
+async function clearAllRevokedPlans() {
+  try {
+    const res = await api("DELETE", "/v1/relationships");
+    toast(`Cleared ${res.count || 0} revoked plans`);
+    await loadRelationships();
+  } catch (e) {
+    toast(e.message || "Failed to clear revoked plans", true);
+  }
+}
+
 async function revokeRelationship(id) {
-  if (!confirm("Stop managing this plan? They keep their current activities and targets exactly as they are — you just won't be able to see or edit them anymore.")) return;
   try {
     await api("DELETE", `/v1/relationships/${id}`);
+    toast("Plan revoked");
     await loadRelationships();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 let CURRENT_RELATIONSHIP = null;
@@ -2356,30 +4113,70 @@ let CURRENT_IS_PENDING = false;
 
 async function openRelationshipDetail(id) {
   try {
-    const d = await api("GET", `/v1/relationships/${id}/activity`);
+    const [d, { suggestions }] = await Promise.all([
+      api("GET", `/v1/relationships/${id}/activity`),
+      api("GET", `/v1/relationships/${id}/suggested-exercises`),
+    ]);
     CURRENT_RELATIONSHIP = id;
     CURRENT_MANAGED_USER_ID = d.managed_user_id;
     CURRENT_IS_PENDING = false;
-    renderRelationshipDetail(d);
+    PENDING_SUGGESTIONS_CACHE = suggestions;
+    renderRelationshipDetail(d, suggestions);
     go("relationship-detail");
   } catch (e) { toast(e.message, true); }
 }
 
-function renderRelationshipDetail(d) {
-  $("rd-title").textContent = `Their Plan (${RELATION_LABELS[d.relation_type] || d.relation_type})`;
+function renderSuggestionsSection(suggestions) {
+  if (!suggestions.length) return "";
+  return `
+    <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
+      <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Suggested for Them</h3>
+      <p class="font-label-sm text-label-sm text-secondary -mt-1 mb-1">Chosen for the conditions you set — genuinely helps, not just safe. Ranked best first.</p>
+      ${suggestions.map((s, i) => `
+        <div class="flex items-center justify-between py-sm border-t border-black/5 gap-sm">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-xs">
+              <span class="shrink-0 w-6 h-6 rounded-full bg-primary-fixed/20 text-on-primary-fixed-variant font-label-bold text-label-sm flex items-center justify-center">${i + 1}</span>
+              <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(s.display_name)}</p>
+            </div>
+            <p class="font-label-sm text-label-sm text-secondary ml-8">${RANK_LABEL[i] || `${i + 1}th Best`}</p>
+            <div class="flex items-center gap-xs mt-1">
+              ${s.prescription_type === "reps" || s.prescription_type === "hold" ? `
+                <input id="sg-sets-${s.activity_type}" type="number" min="1" value="${s.suggested_sets}"
+                  class="w-12 bg-surface-container-low border-none rounded px-1 py-1 text-center font-label-sm text-label-sm">
+                <span class="font-label-sm text-label-sm text-secondary">x</span>` : ""}
+              <input id="sg-amount-${s.activity_type}" type="number" step="any" value="${s.suggested_amount}"
+                class="w-16 bg-surface-container-low border-none rounded px-1 py-1 text-center font-label-sm text-label-sm">
+              <span class="font-label-sm text-label-sm text-secondary">${s.amount_unit}</span>
+            </div>
+          </div>
+          <button onclick="acceptSuggestedExercise('${s.activity_type}')"
+            class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold">Add</button>
+        </div>`).join("")}
+    </section>`;
+}
+
+function renderRelationshipDetail(d, suggestions = []) {
+  $("rd-title").textContent = d.name
+    ? `${d.name}'s Plan (${RELATION_LABELS[d.relation_type] || d.relation_type})`
+    : `Their Plan (${RELATION_LABELS[d.relation_type] || d.relation_type})`;
   const streak = d.streak.current || 0;
   const entries = d.managed_entries || [];
   const overrides = d.safety_overrides || [];
 
-  const entriesHtml = entries.length ? entries.map(e => `
+  const entriesHtml = entries.length ? entries.map(e => {
+    const isDist = e.activity_type === "walk" || e.activity_type === "running";
+    const targetDesc = isDist ? `${e.target_amount} km` : `${e.target_sets} x ${e.target_amount}`;
+    return `
     <div class="flex items-center justify-between py-sm border-t border-black/5">
       <div class="min-w-0">
         <p class="font-body-lg text-body-lg text-on-background">${escapeHtml(e.activity_type)}</p>
-        <p class="font-label-sm text-label-sm text-secondary">${e.target_sets} x ${e.target_amount} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
+        <p class="font-label-sm text-label-sm text-secondary">${targetDesc} · ${e.auto_progress ? "auto-adjusting" : "fixed"}</p>
       </div>
       <button onclick="editManagedTarget('${e.activity_type}', ${e.target_sets}, ${e.target_amount})"
         class="shrink-0 bg-black/5 hover:bg-black/10 px-md py-xs rounded-full font-label-bold text-label-bold text-on-background">Edit</button>
-    </div>`).join("")
+    </div>`;
+  }).join("")
     : `<p class="font-body-md text-on-surface-variant py-sm">You haven't added anything to their plan yet.</p>`;
 
   $("rd-body").innerHTML = `
@@ -2389,6 +4186,8 @@ function renderRelationshipDetail(d) {
         <p class="font-headline-sm text-headline-sm text-on-background">${streak} day${streak === 1 ? "" : "s"}</p>
       </div>
     </section>
+
+    ${renderSuggestionsSection(suggestions)}
 
     <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-1">
       <h3 class="font-headline-sm text-headline-sm text-on-background mb-xs">Activities you manage</h3>
@@ -2417,49 +4216,138 @@ function renderRelationshipDetail(d) {
 }
 
 async function editManagedTarget(activityType, currentSets, currentAmount) {
-  const sets = window.prompt(`Sets for ${activityType}:`, currentSets);
-  if (sets === null) return;
-  const amount = window.prompt(`Amount per set for ${activityType}:`, currentAmount);
-  if (amount === null) return;
+  const isDist = activityType === "walk" || activityType === "running";
+  let sets = 1;
+  let amount = null;
+  if (isDist) {
+    const val = window.prompt(`Distance in km for ${activityType}:`, currentAmount);
+    if (val === null) return;
+    amount = parseFloat(val);
+  } else {
+    const setsVal = window.prompt(`Sets for ${activityType}:`, currentSets);
+    if (setsVal === null) return;
+    sets = parseInt(setsVal, 10) || 1;
+    const amountVal = window.prompt(`Amount per set for ${activityType}:`, currentAmount);
+    if (amountVal === null) return;
+    amount = parseFloat(amountVal);
+  }
+  if (!amount || amount <= 0) {
+    toast(isDist ? "Enter distance in km." : "Enter an amount greater than zero.", true);
+    return;
+  }
   try {
     await api("PUT", `/v1/program/entries/${activityType}/target`, {
       managed_user_id: CURRENT_MANAGED_USER_ID,
-      target_sets: parseInt(sets, 10), target_amount: parseFloat(amount),
+      target_sets: sets, target_amount: amount,
     });
     toast("Updated");
     await openRelationshipDetail(CURRENT_RELATIONSHIP);
   } catch (e) { toast(e.message, true); }
 }
 
+let MANAGED_ACTIVITIES_CACHE = [];
+
 async function openManagedAddModal() {
   if (!CURRENT_RELATIONSHIP) return;
   try {
-    const { activities } = await api("GET", "/v1/taxonomy/activities");
-    $("ma-activity").innerHTML = activities.map(a =>
-      `<option value="${a.activity_type}">${escapeHtml(a.display_name)}</option>`).join("");
-    // Custom exercises need a real, already-existing account to attach to —
-    // not available yet while the invite is still pending (no managed_user_id).
-    $("ma-custom-section").classList.toggle("hidden", CURRENT_IS_PENDING);
-    const m = $("managed-add-modal"); m.classList.remove("hidden"); m.classList.add("flex");
+    const [{ activities }, { blocked }] = await Promise.all([
+      api("GET", "/v1/taxonomy/activities"),
+      api("GET", `/v1/relationships/${CURRENT_RELATIONSHIP}/blocked-activities`),
+    ]);
+    MANAGED_ACTIVITIES_CACHE = activities;
+    // Blocked ones are disabled outright here, no override offered — if the
+    // manager still wants that exact movement for them, Custom Exercise
+    // (below, no grid check by design) is the way, not this picker.
+    $("ma-activity").innerHTML = activities.map(a => {
+      const note = blocked[a.activity_type];
+      return `<option value="${a.activity_type}" ${note ? "disabled" : ""}>` +
+        `${note ? "🚫 " : ""}${escapeHtml(a.display_name)}${note ? " — Blocked" : ""}</option>`;
+    }).join("");
+    const firstAvailable = activities.find(a => !blocked[a.activity_type]);
+    if (firstAvailable) {
+      $("ma-activity").value = firstAvailable.activity_type;
+    }
+    $("ma-amount").value = "";
+    updateManagedActivityFields();
+    $("ma-custom-name").value = "";
+    $("ma-custom-type").value = "reps";
+    $("ma-custom-sets").value = "2";
+    $("ma-custom-amount").value = "";
+    updateManagedCustomTargetFields();
+    $("managed-add-modal").classList.remove("hidden");
+    $("managed-add-modal").classList.add("flex");
   } catch (e) { toast(e.message, true); }
 }
 function closeManagedAddModal() {
   const m = $("managed-add-modal"); m.classList.add("hidden"); m.classList.remove("flex");
 }
 
-async function submitManagedAdd(overrideConfirmed) {
+function updateManagedActivityFields() {
   const activityType = $("ma-activity").value;
-  const sets = parseInt($("ma-sets").value, 10) || 1;
+  const isDistance = activityType === "walk" || activityType === "running";
+  const setsWrap = $("ma-sets-wrap");
+  const amountWrap = $("ma-amount-wrap");
+  const amountLabel = $("ma-amount-label");
+  const targetGrid = $("ma-target-fields");
+  const act = (MANAGED_ACTIVITIES_CACHE || []).find(a => a.activity_type === activityType);
+
+  if (isDistance) {
+    if (setsWrap) setsWrap.classList.add("hidden");
+    if (targetGrid) {
+      targetGrid.classList.remove("grid", "grid-cols-2", "gap-sm");
+      targetGrid.classList.add("block");
+    }
+    if (amountLabel) amountLabel.textContent = "km";
+    $("ma-sets").value = "1";
+    $("ma-amount").placeholder = "e.g. 1.0";
+    if (act) $("ma-amount").value = act.default_amount || "1";
+  } else {
+    if (setsWrap) setsWrap.classList.remove("hidden");
+    if (targetGrid) {
+      targetGrid.classList.remove("block");
+      targetGrid.classList.add("grid", "grid-cols-2", "gap-sm");
+    }
+    if (amountLabel) {
+      amountLabel.textContent = act?.prescription_type === "hold" ? "Seconds" : (act?.prescription_type === "reps" ? "Reps" : "Amount");
+    }
+    $("ma-amount").placeholder = "";
+    if (act) {
+      $("ma-sets").value = act.default_sets || "2";
+      $("ma-amount").value = act.default_amount || "";
+    }
+  }
+}
+
+function updateManagedCustomTargetFields() {
+  updateCustomTargetFields($("ma-custom-type").value, "ma-custom-sets-wrap", "ma-custom-amount-label");
+}
+
+async function submitManagedAdd() {
+  const activityType = $("ma-activity").value;
+  const isDistance = activityType === "walk" || activityType === "running";
+  const sets = isDistance ? 1 : (parseInt($("ma-sets").value, 10) || 1);
   const amount = parseFloat($("ma-amount").value);
-  if (!amount || amount <= 0) { toast("Enter an amount greater than zero.", true); return; }
+  if (!amount || amount <= 0) {
+    toast(isDistance ? "Enter distance in km." : "Enter an amount greater than zero.", true);
+    return;
+  }
   try {
     if (CURRENT_IS_PENDING) {
       // Staged against the invite itself — materializes automatically the
-      // moment it's claimed (app/relationships/service.py's claim_invite).
-      await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`, {
+      // moment the link is opened (app/relationships/service.py's
+      // open_invite). The dropdown already disables anything the safety grid
+      // blocks for the staged conditions, so no override path is offered
+      // here — if this still comes back blocked (stale dropdown data), the
+      // manager is pointed at Custom Exercise instead of being asked to
+      // confirm past it.
+      const d = await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries`, {
         activity_type: activityType, target_sets: sets, target_amount: amount,
         auto_progress: $("ma-auto").checked,
       });
+      if (d.needs_confirmation) {
+        toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
+        return;
+      }
       closeManagedAddModal();
       toast("Added to their plan");
       await renderPendingBuild();
@@ -2471,14 +4359,10 @@ async function submitManagedAdd(overrideConfirmed) {
     // this form's sets/amount values stick.
     const d = await api("POST", "/v1/program/entries", {
       activity_type: activityType, managed_user_id: CURRENT_MANAGED_USER_ID,
-      auto_progress: $("ma-auto").checked, override_confirmed: !!overrideConfirmed,
+      auto_progress: $("ma-auto").checked,
     });
     if (d.needs_confirmation) {
-      const ok = confirm(
-        d.warning_text + "\n\nClick OK only if this has been clinically advised. " +
-        "Click Cancel to keep it blocked."
-      );
-      if (ok) await submitManagedAdd(true);
+      toast("That's blocked for the condition(s) you set. Use Custom Exercise instead.", true);
       return;
     }
     await api("PUT", `/v1/program/entries/${activityType}/target`, {
@@ -2493,9 +4377,26 @@ async function submitManagedAdd(overrideConfirmed) {
 async function submitManagedCustomAdd() {
   const name = $("ma-custom-name").value.trim();
   if (!name) { toast("Type a name first", true); return; }
+  const measurementType = $("ma-custom-type").value;
+  const single = measurementType === "distance" || measurementType === "duration";
+  const targetAmount = parseFloat($("ma-custom-amount").value);
+  if (!targetAmount || targetAmount <= 0) { toast("Enter a target greater than zero.", true); return; }
+  const targetSets = single ? 1 : (parseInt($("ma-custom-sets").value, 10) || 1);
   try {
+    if (CURRENT_IS_PENDING) {
+      await api("POST", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-custom-exercises`, {
+        name, measurement_type: measurementType,
+        target_amount: targetAmount, target_sets: targetSets,
+      });
+      $("ma-custom-name").value = "";
+      closeManagedAddModal();
+      toast("Custom exercise staged for their plan");
+      await renderPendingBuild();
+      return;
+    }
     await api("POST", "/v1/custom-exercises", {
-      name, measurement_types: [$("ma-custom-type").value],
+      name, measurement_type: measurementType,
+      target_amount: targetAmount, target_sets: targetSets,
       managed_user_id: CURRENT_MANAGED_USER_ID,
     });
     $("ma-custom-name").value = "";
@@ -2505,12 +4406,83 @@ async function submitManagedCustomAdd() {
   } catch (e) { toast(e.message, true); }
 }
 
+function showSorenessPrompt(activityType) {
+  const p = $("pl-soreness-prompt");
+  if (p) {
+    const tap = $("pl-soreness-tap");
+    if (tap) tap.setAttribute("onclick", `reportExerciseSoreness('${activityType}')`);
+    p.classList.remove("hidden");
+  }
+  const pd = $("pl-done-soreness-prompt");
+  if (pd) {
+    const tapDone = $("pl-done-soreness-tap");
+    if (tapDone) tapDone.setAttribute("onclick", `reportExerciseSoreness('${activityType}')`);
+    pd.classList.remove("hidden");
+  }
+}
+
+async function reportExerciseSoreness(activityType) {
+  if ($("pl-soreness-prompt")) $("pl-soreness-prompt").classList.add("hidden");
+  if ($("pl-done-soreness-prompt")) $("pl-done-soreness-prompt").classList.add("hidden");
+  try {
+    const r = await api("POST", "/v1/soreness/report", {activity_type: activityType});
+    toast(r.reduced
+      ? "Noted — we've reduced this exercise's target for now."
+      : "Thanks, noted.");
+  } catch (e) { toast(e.message, true); }
+  // On the done-view the soreness prompt is purely informational — no navigation.
+  if (!$("pl-done-view").classList.contains("hidden")) return;
+  // Call the pending action (playerGo(1) or finishPlayerSession).
+  if (playerPendingSorenessAction) {
+    const action = playerPendingSorenessAction;
+    playerPendingSorenessAction = null;
+    await action();
+  } else {
+    playerGo(1);
+  }
+}
+
+async function addWaterGlass() {
+  try {
+    const r = await api("POST", "/v1/water-intake/add", {});
+    $("h-water-count").textContent = r.glasses_count;
+  } catch (e) { toast(e.message, true); }
+}
+
+async function clearSoreness(activityType) {
+  try {
+    await api("POST", "/v1/soreness/clear", {activity_type: activityType});
+    toast("Restored to its normal target.");
+    loadHome();
+  } catch (e) { toast(e.message, true); }
+}
+
+function dismissSorenessPrompt() {
+  if ($("pl-soreness-prompt")) $("pl-soreness-prompt").classList.add("hidden");
+  if ($("pl-done-soreness-prompt")) $("pl-done-soreness-prompt").classList.add("hidden");
+  // On the done-view the soreness prompt is purely informational — no navigation.
+  if (!$("pl-done-view").classList.contains("hidden")) return;
+  // Call the pending action (playerGo(1) or finishPlayerSession).
+  if (playerPendingSorenessAction) {
+    const action = playerPendingSorenessAction;
+    playerPendingSorenessAction = null;
+    action();
+  } else {
+    playerGo(1);
+  }
+}
+
 // Every function referenced from an inline onclick="..." in index.html must be
 // reachable on window — a Vite module's top-level functions are scoped to the
 // module, not attached to the global object the way a plain <script> tag's
 // were in the original single-file version.
 Object.assign(window, {
-  doAuth, submitOnboarding, selectActivityPeriod,
+  $,
+  doAuth, setAuthMode, toggleAuthMode, submitAuthForm,
+  togglePasswordVisibility, checkPasswordRules,
+  openForgotPasswordModal, closeForgotPasswordModal, submitForgotPassword,
+  submitNewPassword,
+  submitOnboarding, selectActivityPeriod,
   toggleWhisperRecording, voiceSubmitTranscript, confirmVoiceLog, editVoiceLog, cancelVoiceLog, editVoiceValue,
   setElevenLabsEnabled,
   openCatalogue, closeCatalogue, addFromCatalogue,
@@ -2521,24 +4493,52 @@ Object.assign(window, {
   startWorkout, playerGo, playerMarkDone, playerAddRestTime, playerSkipRest, closePlayer,
   playerToggleSet, playerTogglePause,
   openCreateInviteModal, closeCreateInviteModal, createRelationshipInvite, copyInviteLink,
+  promptRevokeRelationship, promptDeleteRelationship, closeRevokeModal, executeRevokeRelationship, clearAllRevokedPlans,
   revokeRelationship, openRelationshipDetail, editManagedTarget,
   openManagedAddModal, closeManagedAddModal, submitManagedAdd, submitManagedCustomAdd,
-  openPendingBuild, removePendingEntry,
+  openPendingBuild, removePendingEntry, togglePendingCondition, savePendingProfile,
+  renderExerciseBrowse, editPendingProfile, removePendingCustomExercise,
+  updateManagedActivityFields, updateManagedCustomTargetFields, acceptSuggestedExercise,
+  openGpsTracker, closeGpsTracker, selectGpsActivity, startGpsTracking, finishGpsTracking,
+  openGpsTrackerForPlayer, playerRemoveCurrent, playerEditCurrent, closePlayerEditModal, submitPlayerEdit,
+  discardGpsManualDistance, submitGpsManualDistance,
+  togglePePerSet, renderPePerSetInputs, updatePeSetValue, addPeSetRow, removePeSetRow, openCatalogueAddEditor,
+  closeCatalogueAddEditor, submitCatalogueAdd, toggleCaPerSet, renderCaPerSetInputs,
+  addCaSetRow, removeCaSetRow, updateCaSetValue, updatePlayerSetActual,
+  openActivityLogHistory,
+  openTargetChangesHistory,
+  filterTargetChangesHistory,
+  reportExerciseSoreness,
+  addWaterGlass,
+  clearSoreness,
+  dismissSorenessPrompt,
+  playerSetDistance,
+  playerAdjustDistance,
+  playerUseTarget,
 });
 
 (async () => {
-  // Found live: opening an invite link on the SAME browser where the
-  // manager is already logged in silently continued as the manager's own
-  // account (AT was already set, so this skipped straight past the login
-  // screen) — the exact "it's using my account instead of asking the
-  // student/patient/child to sign in as themselves" bug. An invite link
-  // must always show the login/signup screen, regardless of who (if anyone)
-  // is already authenticated on this device, so the actual recipient signs
-  // up or logs in as THEIR OWN account before the link gets claimed.
-  if (PENDING_INVITE_TOKEN) {
-    toast("Sign up or log in as the person this plan is for.");
-    go("auth");
+  // Check if opened via password reset link: ?reset_token=... or ?token=...
+  const urlParams = new URLSearchParams(window.location.search);
+  const resetTokenFromUrl = urlParams.get("reset_token") || urlParams.get("token");
+  if (resetTokenFromUrl) {
+    if ($("r-token")) $("r-token").value = resetTokenFromUrl;
+    go("reset-password");
+    // Clean up query param from URL bar
+    const cleanUrl = window.location.pathname + window.location.hash;
+    window.history.replaceState({}, document.title, cleanUrl);
     return;
+  }
+
+  // Confirmed in conversation: opening an invite link grants access
+  // directly — the managed person never signs up or logs in. This silently
+  // creates (or re-opens) their real account and switches this tab into it,
+  // regardless of whoever else might already be logged in on this device —
+  // that's the whole mechanism, not a bug. Only revoking the link (done by
+  // whoever created it) ever cuts this off.
+  if (PENDING_INVITE_TOKEN) {
+    const opened = await openPendingInviteIfAny();
+    if (!opened) { go("auth"); return; }
   }
   if (!AT) { go("auth"); return; }
   try {

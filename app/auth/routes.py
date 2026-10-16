@@ -7,7 +7,7 @@ from app.auth import service
 from app.gateway.middleware import enforce_preauth_rate_limits, require_auth
 from app.platform.db import session_scope
 from app.platform.errors import ValidationError
-from app.platform.mailer import send_email
+from app.platform.mailer import build_password_reset_html, send_email
 
 bp = Blueprint("auth", __name__, url_prefix="/v1/auth")
 
@@ -82,7 +82,15 @@ def signup():
             to=user.email,
             subject="Verify your ViTAinspire email",
             body=f"Your verification token: {verify_token}",
+            from_email=cfg.mail_from,
+            from_name=cfg.mail_sender_name,
             is_production=cfg.is_production,
+            smtp_host=cfg.smtp_host,
+            smtp_port=cfg.smtp_port,
+            smtp_user=cfg.smtp_user,
+            smtp_password=cfg.smtp_password,
+            smtp_use_tls=cfg.smtp_use_tls,
+            smtp_use_ssl=cfg.smtp_use_ssl,
         )
         return _pair_response(pair, status=201, user_id=user.id)
 
@@ -166,11 +174,43 @@ def password_reset_request():
     with session_scope() as session:
         raw = service.request_password_reset(session, email)
         if raw:
+            reset_url = f"{cfg.frontend_url}/?reset_token={raw}#reset-password"
+            body = (
+                f"Hello,\n\n"
+                f"We received a request to reset your password for your ViTAinspire account.\n\n"
+                f"Click the link below to set your new password:\n"
+                f"{reset_url}\n\n"
+                f"Or use your one-time reset code: {raw}\n\n"
+                f"Password Requirements:\n"
+                f"- At least 1 capital letter (A-Z)\n"
+                f"- At least 1 small letter (a-z)\n"
+                f"- At least 1 number (0-9)\n"
+                f"- At least 1 special character (!@#$%^&*...)\n"
+                f"- Minimum {cfg.password_min_length} characters\n\n"
+                f"This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.\n\n"
+                f"— ViTAinspire Team\n"
+                f"{cfg.mail_from}"
+            )
+            html_body = build_password_reset_html(
+                reset_url=reset_url,
+                token=raw,
+                sender_email=cfg.mail_from,
+                min_length=cfg.password_min_length,
+            )
             send_email(
                 to=email,
                 subject="Reset your ViTAinspire password",
-                body=f"Your password reset token: {raw}",
+                body=body,
+                html_body=html_body,
+                from_email=cfg.mail_from,
+                from_name=cfg.mail_sender_name,
                 is_production=cfg.is_production,
+                smtp_host=cfg.smtp_host,
+                smtp_port=cfg.smtp_port,
+                smtp_user=cfg.smtp_user,
+                smtp_password=cfg.smtp_password,
+                smtp_use_tls=cfg.smtp_use_tls,
+                smtp_use_ssl=cfg.smtp_use_ssl,
             )
     # Identical response either way — otherwise this is an enumeration oracle (1.9).
     return jsonify({"status": "ok", "message": service.RESET_ACK})

@@ -5,7 +5,7 @@ when the key is ABSENT, not when it's present with a null value. Every case
 here previously raised an uncaught AttributeError deep in a route or service
 function; all must now return a clean 401/422, never a 500.
 """
-PASSWORD = "a-good-long-passphrase-123"
+PASSWORD = "A-good-long-passphrase-123"
 
 
 def test_login_with_null_email_returns_401_not_500(client):
@@ -65,7 +65,7 @@ def test_change_password_with_null_current_password_returns_422_not_500(make_use
     user = make_user()
     r = client.post(
         "/v1/auth/change-password",
-        json={"current_password": None, "new_password": "a-new-good-passphrase-456"},
+        json={"current_password": None, "new_password": "A-new-good-passphrase-456"},
         headers=user["headers"],
     )
     assert r.status_code == 422

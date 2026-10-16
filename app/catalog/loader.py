@@ -143,6 +143,7 @@ def load_safety_grid(session) -> int:
     # and is what makes a re-review land in full.
     session.execute(delete(SafetyGridCell))
     ranks_by_condition: dict[str, list[int]] = {}
+    therapeutic_by_condition: dict[str, list[int]] = {}
     for r in rows:
         verdict = r["verdict"].strip()
         if not verdict:
@@ -171,12 +172,32 @@ def load_safety_grid(session) -> int:
                 )
             usefulness_rank = int(rank_raw)
             ranks_by_condition.setdefault(condition_code, []).append(usefulness_rank)
+
+        therapeutic_raw = (r.get("therapeutic_rank") or "").strip()
+        if not therapeutic_raw:
+            therapeutic_rank = None
+        elif verdict == "avoid":
+            raise CoverageError(
+                f"safety_grid.csv has a therapeutic_rank for "
+                f"{condition_code} x {r['activity_type']}, but its verdict is "
+                "'avoid' — a banned activity cannot also be ranked as helpful. Clear it."
+            )
+        else:
+            therapeutic_rank = int(therapeutic_raw)
+            if not 1 <= therapeutic_rank <= 5:
+                raise CoverageError(
+                    f"therapeutic_rank for {condition_code} x {r['activity_type']} is "
+                    f"{therapeutic_rank} — must be 1-5 (top 5 only) or blank."
+                )
+            therapeutic_by_condition.setdefault(condition_code, []).append(therapeutic_rank)
+
         session.add(SafetyGridCell(
             condition_code=condition_code,
             activity_type=r["activity_type"].strip(),
             verdict=verdict,
             note=(r.get("note") or "").strip() or None,
             usefulness_rank=usefulness_rank,
+            therapeutic_rank=therapeutic_rank,
             reviewer=r["reviewer"].strip(),
             reviewed_at=_date_or_none(r.get("reviewed_at", "")),
         ))
@@ -190,6 +211,18 @@ def load_safety_grid(session) -> int:
         if sorted(ranks) != expected:
             raise CoverageError(
                 f"usefulness_rank for condition '{condition_code}' is not a clean "
+                f"1..{len(ranks)} ordering (got {sorted(ranks)}) — check for a "
+                "duplicate or skipped rank."
+            )
+
+    # Same no-ties/no-gaps rule as usefulness_rank above, but the count is
+    # whatever genuinely qualifies (0-5), not every safe/modify activity —
+    # most conditions have far fewer than 5 activities that actually help.
+    for condition_code, ranks in therapeutic_by_condition.items():
+        expected = list(range(1, len(ranks) + 1))
+        if sorted(ranks) != expected:
+            raise CoverageError(
+                f"therapeutic_rank for condition '{condition_code}' is not a clean "
                 f"1..{len(ranks)} ordering (got {sorted(ranks)}) — check for a "
                 "duplicate or skipped rank."
             )

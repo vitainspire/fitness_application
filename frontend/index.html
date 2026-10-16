@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Fitness App</title>
+<link rel="icon" href="data:,">
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
   @keyframes talkBounce {
     0% { transform: scale(1.05) translateY(0); }
@@ -14,6 +16,12 @@
   .animate-talk {
     animation: talkBounce 0.15s ease-in-out infinite alternate;
   }
+  /* Hides the native up/down spinner arrows on a number input — used for
+     inline edit fields where those arrows just crowd a small box. */
+  .no-spinner::-webkit-inner-spin-button, .no-spinner::-webkit-outer-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .no-spinner { -moz-appearance: textfield; }
 </style>
 </head>
 <body>
@@ -24,22 +32,180 @@
 <!-- ════════ AUTH ════════ -->
 <section id="s-auth" class="screen on">
   <div class="max-w-md mx-auto px-container-margin pt-xl">
-    <h1 class="font-display-lg-mobile text-display-lg-mobile text-on-surface">Let's Get Started</h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-xs mb-lg">Create an account to begin.</p>
-    <div class="bg-surface-container-lowest ambient-shadow rounded-lg p-lg flex flex-col gap-md">
+    <div class="flex items-center justify-between mb-sm">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-xl bg-primary-container text-on-primary-fixed flex items-center justify-center font-bold text-sm shadow-xs">V</div>
+        <span class="text-sm font-extrabold tracking-tight text-on-surface">ViTAinspire</span>
+      </div>
+    </div>
+    <h1 id="a-title" class="font-display-lg-mobile text-display-lg-mobile text-on-surface font-extrabold tracking-tight">Welcome Back</h1>
+    <p id="a-sub" class="font-body-md text-body-md text-on-surface-variant mt-xs mb-lg">Sign in to access your workouts & recovery plan.</p>
+
+    <!-- Tab switcher -->
+    <div class="flex items-center bg-surface-container-low p-1 rounded-full mb-md">
+      <button type="button" id="auth-tab-login" onclick="setAuthMode('login')"
+        class="flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs">
+        Sign In
+      </button>
+      <button type="button" id="auth-tab-signup" onclick="setAuthMode('signup')"
+        class="flex-1 py-1.5 text-xs font-bold rounded-full transition-all text-on-surface-variant hover:text-on-surface">
+        Create Account
+      </button>
+    </div>
+
+    <div class="bg-surface-container-lowest ambient-shadow rounded-2xl p-lg flex flex-col gap-md">
       <div>
-        <label class="font-label-bold text-label-bold text-on-surface">Email</label>
-        <input id="a-email" type="email" placeholder="you@example.com"
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Email</label>
+        <input id="a-email" type="email" placeholder="you@example.com" autocomplete="email"
           class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
       </div>
       <div>
-        <label class="font-label-bold text-label-bold text-on-surface">Password</label>
-        <input id="a-pass" type="password"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+        <div class="flex items-center justify-between">
+          <label class="font-label-bold text-label-bold text-on-surface text-xs">Password</label>
+        </div>
+        <div class="relative mt-xs">
+          <input id="a-pass" type="password" placeholder="Enter password" autocomplete="current-password"
+            oninput="if((window.authMode||'login')==='signup') checkPasswordRules('a-pass', null, 'a')"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('a-pass', 'a-pass-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="a-pass-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
+        </div>
+        <!-- Forgot password link in login mode -->
+        <div id="a-forgot-wrap" class="flex justify-end mt-1.5">
+          <button type="button" onclick="openForgotPasswordModal()" class="text-xs font-semibold text-primary hover:underline">
+            Forgot password?
+          </button>
+        </div>
       </div>
-      <div id="a-err" class="hidden rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container"></div>
-      <button onclick="doAuth('signup')" class="w-full bg-primary-fixed text-on-primary-fixed font-label-bold text-label-bold py-md rounded-full shadow-lg active:scale-95 transition-all">Create account</button>
-      <button onclick="doAuth('login')" class="w-full font-label-sm text-label-sm text-on-surface-variant py-xs">I already have an account</button>
+
+      <!-- Password complexity checklist for signup mode -->
+      <div id="a-pw-rules-wrap" class="hidden bg-surface-container-low/70 rounded-xl p-3 border border-outline-variant/30 space-y-1.5 text-xs">
+        <p class="font-bold text-on-surface text-[11px] mb-1">Password must contain:</p>
+        <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
+          <div id="a-rule-upper" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Capital (A-Z)</span>
+          </div>
+          <div id="a-rule-lower" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Small (a-z)</span>
+          </div>
+          <div id="a-rule-number" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Number (0-9)</span>
+          </div>
+          <div id="a-rule-special" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Special char</span>
+          </div>
+          <div id="a-rule-length" class="flex items-center gap-1 text-secondary col-span-2">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>Min 10 characters</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="a-err" class="hidden rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs"></div>
+      <button id="a-submit-btn" onclick="submitAuthForm()" class="w-full bg-primary-fixed text-on-primary-fixed font-label-bold text-label-bold py-md rounded-full shadow-lg active:scale-95 transition-all">
+        Sign In
+      </button>
+
+      <button id="a-toggle-btn" type="button" onclick="toggleAuthMode()" class="w-full font-label-sm text-xs text-on-surface-variant py-xs hover:text-on-surface">
+        New to ViTAinspire? Create account
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ RESET PASSWORD SCREEN ════════ -->
+<section id="s-reset-password" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-xl">
+    <div class="flex items-center gap-xs mb-sm">
+      <button type="button" onclick="go('auth')" class="w-8 h-8 rounded-full flex items-center justify-center bg-white/80 hover:bg-white text-on-surface-variant shadow-xs">
+        <span class="material-symbols-outlined text-sm">arrow_back</span>
+      </button>
+      <span class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">ViTAinspire Security</span>
+    </div>
+    <h1 class="font-display-lg-mobile text-display-lg-mobile text-on-surface font-extrabold tracking-tight">Set New Password</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-xs mb-lg">Choose a new password meeting our clinical-grade security requirements.</p>
+
+    <div class="bg-surface-container-lowest ambient-shadow rounded-2xl p-lg flex flex-col gap-md">
+      <!-- Token field (prefilled from URL or editable) -->
+      <div id="r-token-wrap">
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Reset Code / Token</label>
+        <input id="r-token" type="text" placeholder="Paste reset code from email" autocomplete="one-time-code"
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-mono text-xs focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+        <p class="font-label-sm text-[11px] text-on-surface-variant mt-1">Emailed to you from <span class="font-semibold text-on-surface">ayush.kumar@vitainspire.com</span></p>
+      </div>
+
+      <!-- Add New Password -->
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Add New Password</label>
+        <div class="relative mt-xs">
+          <input id="r-pass" type="password" autocomplete="new-password" placeholder="Enter new password"
+            oninput="checkPasswordRules('r-pass', 'r-pass-confirm', 'r')"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('r-pass', 'r-pass-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="r-pass-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Type Again New Password -->
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Type Again New Password</label>
+        <div class="relative mt-xs">
+          <input id="r-pass-confirm" type="password" autocomplete="new-password" placeholder="Re-type new password"
+            oninput="checkPasswordRules('r-pass', 'r-pass-confirm', 'r')"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('r-pass-confirm', 'r-confirm-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="r-confirm-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Password Requirements Checklist -->
+      <div class="bg-surface-container-low/70 rounded-xl p-3.5 border border-outline-variant/30 space-y-1.5">
+        <p class="text-xs font-bold text-on-surface mb-2">Password must contain:</p>
+        <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 text-xs">
+          <div id="r-rule-upper" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>1 Capital (A-Z)</span>
+          </div>
+          <div id="r-rule-lower" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>1 Small (a-z)</span>
+          </div>
+          <div id="r-rule-number" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>1 Number (0-9)</span>
+          </div>
+          <div id="r-rule-special" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>1 Special character</span>
+          </div>
+          <div id="r-rule-length" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>Min 10 characters</span>
+          </div>
+          <div id="r-rule-match" class="flex items-center gap-1.5 text-secondary">
+            <span class="material-symbols-outlined text-xs">radio_button_unchecked</span>
+            <span>Passwords match</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="r-err" class="hidden rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs"></div>
+      <div id="r-success" class="hidden rounded-lg px-md py-sm font-body-md bg-emerald-100 text-emerald-800 text-xs font-semibold"></div>
+
+      <button id="r-submit-btn" onclick="submitNewPassword()" class="w-full bg-primary-fixed text-on-primary-fixed font-label-bold text-label-bold py-md rounded-full shadow-lg active:scale-95 transition-all">
+        Update Password
+      </button>
+
+      <button type="button" onclick="go('auth')" class="w-full font-label-sm text-xs text-on-surface-variant py-xs hover:text-on-surface">
+        Cancel and return to Sign In
+      </button>
     </div>
   </div>
 </section>
@@ -52,7 +218,7 @@
     <div class="flex flex-col gap-lg">
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Age</label>
-        <input id="o-age" type="number" value="30" min="18"
+        <input id="o-age" type="number" value="30" min="1"
           class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
       </div>
       <div class="flex flex-col gap-sm">
@@ -203,6 +369,48 @@
       </div>
     </section>
 
+    <!-- Recent Activities: shows latest logged walks, runs and workouts -->
+    <section id="h-recent-activities-section" class="space-y-md">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-headline-sm text-headline-sm text-on-surface">Recent Activities</h3>
+          <p class="text-[11px] font-semibold text-secondary">Your latest tracked walks, runs & workouts</p>
+        </div>
+        <button onclick="openActivityLogHistory()" class="font-label-bold text-label-bold text-primary hover:underline text-xs flex items-center gap-0.5">
+          View all <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
+        </button>
+      </div>
+      <div id="h-recent-activities-list" class="flex flex-col gap-sm"></div>
+    </section>
+
+    <section id="h-water-section" class="space-y-md">
+      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex items-center justify-between">
+        <div>
+          <h3 class="font-headline-sm text-headline-sm text-on-surface">Water Intake</h3>
+          <p class="font-body-md text-body-md text-on-surface-variant"><span id="h-water-count">0</span> glasses today</p>
+        </div>
+        <button onclick="addWaterGlass()" class="w-12 h-12 rounded-full bg-primary text-on-primary flex items-center justify-center text-2xl font-bold active:scale-90 transition-all">+</button>
+      </div>
+    </section>
+
+    <section id="h-soreness-section" class="space-y-md hidden">
+      <div class="flex items-center justify-between">
+        <h3 class="font-headline-sm text-headline-sm text-on-surface">Taking It Easy On</h3>
+      </div>
+      <div id="h-soreness-list" class="flex flex-col gap-sm"></div>
+    </section>
+
+    <section id="h-personal-bests-section" class="space-y-md hidden">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-headline-sm text-headline-sm text-on-surface">Personal Records</h3>
+          <p class="text-[11px] font-semibold text-secondary">Your highest record for each exercise</p>
+        </div>
+      </div>
+      <div id="h-personal-bests-cards" class="grid grid-cols-2 gap-sm items-stretch"></div>
+    </section>
+
+
     <!-- your own exercises: tracking-only, never suggested/programmed (4.4) -
          the one piece of exercise-specific UI that stays on the Dashboard,
          since it isn't part of the guided Workout Player's program list at
@@ -240,6 +448,15 @@
       <span id="main-mic-icon" class="material-symbols-outlined text-[32px]">mic</span>
     </button>
   </div>
+
+  <!-- outdoor GPS run/walk tracker FAB — third logging method alongside the
+       guided Workout Player and voice, not a Dashboard feature. -->
+  <div class="fixed bottom-24 right-[88px] z-50">
+    <button onclick="openGpsTracker()" aria-label="Track an outdoor run or walk"
+      class="w-12 h-12 rounded-full bg-white shadow-lg flex items-center justify-center text-primary active:scale-95 transition-all border border-outline-variant/30">
+      <span class="material-symbols-outlined text-[24px]">near_me</span>
+    </button>
+  </div>
 </section>
 
 <!-- ════════ WORKOUT PLAYER (guided, one exercise at a time) ════════ -->
@@ -271,6 +488,15 @@
           <span class="material-symbols-outlined text-[16px] text-primary">add</span>
           <span class="text-[11px] font-bold">Add</span>
         </button>
+        <!-- Removes the CURRENT exercise from today's plan, same effect as
+             removing it from Settings' exercise list would have — just
+             reachable mid-session instead of requiring a restart. -->
+        <button onclick="playerEditCurrent()" aria-label="Edit sets/amount" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
+          <span class="material-symbols-outlined text-[18px]">edit</span>
+        </button>
+        <button onclick="playerRemoveCurrent()" aria-label="Remove this exercise" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-error border border-black/5 shadow-sm active:scale-95 transition-all">
+          <span class="material-symbols-outlined text-[18px]">delete</span>
+        </button>
         <button onclick="playerTogglePause()" aria-label="Pause workout" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
           <span id="pl-pause-icon" class="material-symbols-outlined text-[18px]">pause</span>
         </button>
@@ -286,15 +512,11 @@
            exercise-video-card exactly — only shown when this exercise
            actually has a demo (no fabricated video for ones that don't). -->
       <div id="pl-video-card" class="hidden exercise-video-card">
-        <div class="video-ratio" style="background:linear-gradient(145deg,#1a2400 0%,#2e3d00 60%,#3d5200 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:clamp(130px,28vw,200px);cursor:pointer;" onclick="openDemo(PLAYER_ITEMS[playerIndex].activity_type)">
-          <div style="position:absolute;inset:0;background-image:repeating-linear-gradient(0deg,rgba(255,255,255,0.03) 0px,rgba(255,255,255,0.03) 1px,transparent 1px,transparent 28px),repeating-linear-gradient(90deg,rgba(255,255,255,0.03) 0px,rgba(255,255,255,0.03) 1px,transparent 1px,transparent 28px);pointer-events:none;"></div>
-          <div style="width:52px;height:52px;border-radius:50%;background:rgba(212,255,51,0.15);border:2px solid rgba(212,255,51,0.4);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="#d4ff33"><path d="M8 5v14l11-7z"></path></svg>
-          </div>
-          <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
-            <span id="pl-video-label" style="font-size:13px;font-weight:800;color:#ffffff;letter-spacing:0.02em;text-align:center;padding:0 12px;"></span>
-            <span style="font-size:10px;font-weight:600;color:rgba(212,255,51,0.7);letter-spacing:0.06em;text-transform:uppercase;">Exercise Demo</span>
-          </div>
+        <div class="video-ratio" style="background:linear-gradient(145deg,#1a2400 0%,#2e3d00 60%,#3d5200 100%);display:flex;align-items:center;justify-content:center;height:clamp(130px,28vw,200px);cursor:pointer;overflow:hidden;" onclick="openDemo(PLAYER_ITEMS[playerIndex].activity_type)">
+          <!-- The actual demo plays right here now, visible the whole time
+               data is being entered below — tapping it still opens the full
+               modal (openDemo) for the step-by-step instructions text. -->
+          <img id="pl-video-img" alt="" style="width:100%;height:100%;object-fit:contain;">
         </div>
         <div class="video-footer">
           <div class="flex items-center gap-1.5 min-w-0">
@@ -315,11 +537,28 @@
             <span id="pl-icon" class="material-symbols-outlined text-primary text-[28px]"></span>
           </div>
           <div class="flex-1 min-w-0">
-            <h2 id="pl-title" class="text-lg font-black text-on-background leading-tight truncate"></h2>
+            <div class="flex items-center gap-1.5">
+              <h2 id="pl-title" class="text-lg font-black text-on-background leading-tight truncate"></h2>
+              <span id="pl-done-badge" class="hidden shrink-0 text-[10px] font-bold text-primary bg-primary/10 px-2 py-0.5 rounded-full">✓ Done today</span>
+            </div>
             <p id="pl-prescription" class="text-xs text-secondary font-semibold mt-0.5"></p>
           </div>
         </div>
         <p id="pl-caution" class="hidden font-label-sm text-label-sm text-on-error-container bg-error-container rounded-xl px-sm py-xs"></p>
+
+        <!-- Distance / Duration editor for single-effort exercises (walk, run, etc.) -->
+        <div id="pl-distance-editor" class="hidden flex items-center justify-between bg-black/[0.04] border border-black/5 rounded-2xl p-3 mt-1">
+          <div>
+            <p class="text-[11px] font-bold text-secondary uppercase tracking-wider">Completed Distance</p>
+            <p class="text-[11px] text-secondary">Target: <span id="pl-target-val" class="font-bold text-on-background"></span> · <button type="button" onclick="playerUseTarget()" class="text-primary font-bold hover:underline">Use target</button></p>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button type="button" onclick="playerAdjustDistance(-0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base shadow-xs active:scale-95 text-on-background">-</button>
+            <input id="pl-distance-input" type="number" step="0.05" min="0" class="w-20 text-center font-black text-sm bg-white border border-black/10 rounded-xl py-1.5 px-1 shadow-xs text-on-background focus:ring-2 focus:ring-primary/40 focus:outline-none" oninput="playerSetDistance(this.value)" />
+            <span id="pl-distance-unit" class="text-xs font-bold text-secondary">km</span>
+            <button type="button" onclick="playerAdjustDistance(0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base shadow-xs active:scale-95 text-on-background">+</button>
+          </div>
+        </div>
 
         <!-- per-set slide-to-complete table, matching Exercise workout
              Player.html's own sets table — each set shows ITS OWN target
@@ -347,6 +586,13 @@
         </div>
       </div>
 
+      <!-- Only for Walking/Running — same live-GPS tracker as the Dashboard's
+           shortcut, just logged against THIS player session instead of
+           starting a new one, so it still counts as part of today's workout. -->
+      <button id="pl-gps-btn" onclick="openGpsTrackerForPlayer()" class="hidden w-full mb-sm flex items-center justify-center gap-xs bg-white/80 hover:bg-white text-on-background border border-black/10 font-label-bold text-label-bold py-sm rounded-2xl shadow-sm active:scale-[0.98] transition-all">
+        <span class="material-symbols-outlined text-[18px]">near_me</span> Track with GPS instead
+      </button>
+
       <div class="flex items-center justify-between gap-sm">
         <button onclick="playerGo(-1)" id="pl-prev" class="w-11 h-11 flex items-center justify-center rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm disabled:opacity-30 active:scale-95 transition-all">
           <span class="material-symbols-outlined">chevron_left</span>
@@ -358,6 +604,33 @@
           <span class="material-symbols-outlined">chevron_right</span>
         </button>
       </div>
+
+      <!-- Soreness check card — appears after completing an exercise -->
+      <div id="pl-soreness-prompt" class="hidden mt-2">
+        <div class="frosted-glass-card rounded-[22px] p-3.5">
+          <div class="flex items-center gap-2.5 mb-3">
+            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-sm shrink-0">
+              <span class="material-symbols-outlined text-[19px] text-on-primary-fixed" style="font-variation-settings:'FILL' 1">check_circle</span>
+            </div>
+            <div>
+              <p class="text-[13px] font-black text-on-background leading-tight">Exercise complete!</p>
+              <p class="text-[11px] font-semibold text-secondary mt-0.5">Any soreness or discomfort?</p>
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <button id="pl-soreness-tap" onclick=""
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-amber-400/15 border border-amber-400/30 text-amber-800 font-bold text-[12px] hover:bg-amber-400/25 active:scale-95 transition-all">
+              <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_dissatisfied</span>
+              Felt sore
+            </button>
+            <button onclick="dismissSorenessPrompt()"
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-sm">
+              <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_satisfied</span>
+              Feeling great!
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- completion view -->
@@ -365,6 +638,31 @@
       <span class="material-symbols-outlined text-primary text-[64px]">check_circle</span>
       <h2 class="font-display-lg-mobile text-display-lg-mobile text-on-background">Workout complete</h2>
       <p id="pl-summary" class="font-body-md text-body-md text-secondary"></p>
+      <div id="pl-done-soreness-prompt" class="hidden w-full max-w-sm">
+        <div class="frosted-glass-card rounded-[22px] p-3.5">
+          <div class="flex items-center gap-2.5 mb-3">
+            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-sm shrink-0">
+              <span class="material-symbols-outlined text-[19px] text-on-primary-fixed" style="font-variation-settings:'FILL' 1">check_circle</span>
+            </div>
+            <div>
+              <p class="text-[13px] font-black text-on-background leading-tight">Workout complete!</p>
+              <p class="text-[11px] font-semibold text-secondary mt-0.5">Any soreness or discomfort?</p>
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <button id="pl-done-soreness-tap" onclick=""
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-amber-400/15 border border-amber-400/30 text-amber-800 font-bold text-[12px] hover:bg-amber-400/25 active:scale-95 transition-all">
+              <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_dissatisfied</span>
+              Felt sore
+            </button>
+            <button onclick="dismissSorenessPrompt()"
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-sm">
+              <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_satisfied</span>
+              Feeling great!
+            </button>
+          </div>
+        </div>
+      </div>
       <button onclick="go('home')" class="mt-md bg-primary-fixed text-on-primary-fixed py-md px-xl rounded-full font-label-bold text-label-bold hover:brightness-105">Done</button>
     </div>
   </div>
@@ -416,9 +714,59 @@
 <!-- ════════ VIDEOS ════════ -->
 <section id="s-videos" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg">
-    <h2 class="font-display-lg-mobile text-display-lg-mobile text-on-surface">Video Library</h2>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1 mb-lg">Curated routines for your goals.</p>
-    <div id="v-list" class="flex flex-col gap-lg"></div>
+    <h2 class="font-display-lg-mobile text-display-lg-mobile text-on-surface">Browse Exercises</h2>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1 mb-sm">Reference demonstrations, not tied to your plan.</p>
+    <input id="vb-search" type="text" placeholder="Search by name, body part, or equipment…"
+      oninput="renderExerciseBrowse()"
+      class="w-full rounded-full px-md py-sm bg-surface-container-low font-body-md text-body-md text-on-surface outline-none mb-md">
+    <div id="vb-grid" class="flex flex-col gap-lg mb-xl"></div>
+
+    <!-- YouTube-curated "Video Library" removed for now (product decision,
+         not a bug) — the admin curation workflow behind it was never built,
+         so it would only ever have shown empty/placeholder cards. Backend
+         route and data are untouched, just not called from here, so this is
+         easy to bring back later. -->
+  </div>
+</section>
+
+<!-- ════════ ACTIVITY LOG HISTORY ════════ -->
+<section id="s-activity-history" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
+    <div class="flex items-center gap-sm mb-lg">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 class="font-headline-md text-headline-md text-on-background">Activity Log History</h2>
+    </div>
+    <div id="activity-history-list" class="flex flex-col gap-sm"></div>
+  </div>
+</section>
+
+<!-- ════════ TARGET CHANGES HISTORY ════════ -->
+<section id="s-target-history" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
+    <div class="flex items-center gap-sm mb-md">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <div>
+        <h2 class="font-headline-md text-headline-md text-on-background">Recent Target Changes</h2>
+        <p class="text-[11px] font-semibold text-secondary -mt-0.5">Progression &amp; Growth Explanations</p>
+      </div>
+    </div>
+
+    <!-- Educational Growth & Rationale Banner -->
+    <div class="bg-primary/5 border border-primary/15 rounded-2xl p-sm mb-md flex items-start gap-sm">
+      <span class="material-symbols-outlined text-primary text-[20px] mt-0.5 shrink-0">insights</span>
+      <p class="text-[12px] leading-relaxed text-on-surface-variant">
+        <strong class="text-on-background">How Targets Adapt:</strong> Targets update automatically each week. Consistent adherence (&ge;80%) unlocks safe target increases (+), while lower adherence (&lt;50%) triggers a recovery adjustment (-) to prevent fatigue and support long-term injury prevention.
+      </p>
+    </div>
+
+    <!-- Target filter pills -->
+    <div id="target-history-filters" class="flex items-center gap-1.5 overflow-x-auto pb-sm mb-sm no-scrollbar"></div>
+
+    <div id="target-history-list" class="flex flex-col gap-sm"></div>
   </div>
 </section>
 
@@ -435,6 +783,62 @@
       </div>
     </div>
     <div id="p-body" class="flex flex-col gap-card-gap"></div>
+  </div>
+</section>
+
+<!-- ════════ OUTDOOR GPS RUN/WALK TRACKER ════════
+     Third logging method alongside the guided Workout Player and voice —
+     reuses the same workout_sessions start/finish the Player already uses,
+     tags the final log with source="gps". No route/map history is saved
+     (deliberately out of scope for v1) — this only tracks live, during the
+     session. Needs the screen to stay in the foreground: iOS and (often)
+     Android both suspend background web-page location updates, so there is
+     no "keep tracking after you lock your phone" promise here. -->
+<section id="s-gps" class="screen">
+  <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
+    <div class="flex items-center gap-sm mb-lg">
+      <button onclick="closeGpsTracker()" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <div>
+        <h2 class="font-headline-md text-headline-md text-on-background">Track Outdoor Run/Walk</h2>
+        <p class="text-[11px] font-semibold text-secondary -mt-0.5">Keep this screen open and your phone unlocked while tracking</p>
+      </div>
+    </div>
+
+    <div id="gps-setup" class="flex flex-col gap-md">
+      <p class="font-body-md text-body-md text-on-surface-variant">What are you doing?</p>
+      <div class="grid grid-cols-2 gap-sm">
+        <button onclick="selectGpsActivity('walk')" id="gps-pick-walk" class="py-md rounded-xl border-2 border-outline-variant/40 font-label-bold text-label-bold text-on-surface">Walk</button>
+        <button onclick="selectGpsActivity('running')" id="gps-pick-running" class="py-md rounded-xl border-2 border-outline-variant/40 font-label-bold text-label-bold text-on-surface">Run</button>
+      </div>
+      <button id="gps-start-btn" onclick="startGpsTracking()" disabled
+        class="bg-primary text-on-primary rounded-full py-md font-label-bold text-label-bold disabled:opacity-40">
+        Start Tracking
+      </button>
+    </div>
+
+    <div id="gps-active" class="hidden flex flex-col gap-md">
+      <div id="gps-map" class="w-full rounded-2xl overflow-hidden" style="height: 260px; background: #e5e7eb;"></div>
+      <div class="grid grid-cols-3 gap-sm text-center">
+        <div class="bg-white/80 rounded-xl p-sm">
+          <p class="font-headline-sm text-headline-sm text-on-background" id="gps-distance">0.00</p>
+          <p class="font-label-sm text-label-sm text-secondary">km</p>
+        </div>
+        <div class="bg-white/80 rounded-xl p-sm">
+          <p class="font-headline-sm text-headline-sm text-on-background" id="gps-duration">00:00</p>
+          <p class="font-label-sm text-label-sm text-secondary">time</p>
+        </div>
+        <div class="bg-white/80 rounded-xl p-sm">
+          <p class="font-headline-sm text-headline-sm text-on-background" id="gps-pace">--</p>
+          <p class="font-label-sm text-label-sm text-secondary">min/km</p>
+        </div>
+      </div>
+      <p id="gps-signal-note" class="font-label-sm text-label-sm text-secondary text-center"></p>
+      <button onclick="finishGpsTracking()" class="bg-error-container text-on-error-container rounded-full py-md font-label-bold text-label-bold">
+        Finish
+      </button>
+    </div>
   </div>
 </section>
 
@@ -479,6 +883,32 @@
   </div>
 </section>
 
+<!-- ════════ REVOKE / DELETE PLAN CONFIRMATION MODAL ════════ -->
+<div id="revoke-rel-modal" class="fixed inset-0 z-[120] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeRevokeModal()">
+  <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
+    <div class="flex items-start gap-md">
+      <div id="revoke-modal-icon-wrap" class="w-12 h-12 rounded-full bg-error/10 text-error flex items-center justify-center shrink-0">
+        <span id="revoke-modal-icon" class="material-symbols-outlined text-[26px]">person_remove</span>
+      </div>
+      <div class="flex-1 min-w-0">
+        <h3 id="revoke-modal-title" class="font-headline-sm text-headline-sm text-on-surface font-bold">Stop Managing Plan?</h3>
+        <p id="revoke-modal-desc" class="font-body-sm text-body-sm text-secondary mt-1">
+          They keep all their current activities and history — you just won't be able to see or edit their plan anymore.
+        </p>
+      </div>
+    </div>
+    <div class="flex items-center justify-end gap-sm mt-sm">
+      <button type="button" onclick="closeRevokeModal()" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">
+        Cancel
+      </button>
+      <button type="button" id="revoke-modal-confirm-btn" onclick="executeRevokeRelationship()" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-error text-white shadow-sm hover:opacity-95 active:scale-95 transition-all">
+        Revoke Plan
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- Create-invite modal: pick who this plan is for, get the link back. -->
 <div id="invite-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
      onclick="if (event.target === this) closeCreateInviteModal()">
@@ -488,6 +918,11 @@
       <button onclick="closeCreateInviteModal()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
         <span class="material-symbols-outlined">close</span>
       </button>
+    </div>
+    <div>
+      <label class="font-label-bold text-label-bold text-on-surface">Their name</label>
+      <input id="invite-name" type="text" placeholder="e.g. Priya"
+        class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
     </div>
     <div class="grid grid-cols-2 gap-sm">
       <button onclick="createRelationshipInvite('child')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
@@ -521,15 +956,15 @@
     <div class="p-md flex flex-col gap-md">
       <div>
         <label class="font-label-bold text-label-bold text-on-surface">Activity</label>
-        <select id="ma-activity" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md"></select>
+        <select id="ma-activity" onchange="updateManagedActivityFields()" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md"></select>
       </div>
-      <div class="grid grid-cols-2 gap-sm">
-        <div>
+      <div id="ma-target-fields" class="grid grid-cols-2 gap-sm">
+        <div id="ma-sets-wrap">
           <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
           <input id="ma-sets" type="number" min="1" value="1" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
         </div>
-        <div>
-          <label class="font-label-bold text-label-bold text-on-surface">Amount</label>
+        <div id="ma-amount-wrap">
+          <label id="ma-amount-label" class="font-label-bold text-label-bold text-on-surface">Amount</label>
           <input id="ma-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
         </div>
       </div>
@@ -539,14 +974,15 @@
       </label>
       <button onclick="submitManagedAdd()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Add</button>
 
-      <!-- Custom exercise: tracking-only, same as it already works for
-           yourself — no auto-update toggle, since custom exercises have no
-           such concept for anyone, today. Hidden while an invite is still
-           pending — it needs a real, already-existing account to attach to. -->
+      <!-- Custom exercise: a fixed target, same as a built-in activity —
+           never blocked by the safety grid, by design (the escape hatch for
+           an exercise the picker above greys out). Always available, even
+           while an invite is still pending (staged, materialized once the
+           link is opened). -->
       <div id="ma-custom-section" class="flex flex-col gap-md">
         <div class="border-t border-outline-variant/30 pt-md mt-xs">
           <h4 class="font-headline-sm text-headline-sm text-on-surface">Or add a custom exercise for them</h4>
-          <p class="font-body-md text-body-md text-on-surface-variant mt-1">Tracked in their history only — never auto-updated.</p>
+          <p class="font-body-md text-body-md text-on-surface-variant mt-1">Not screened against their conditions — only add this yourself if you're sure it's appropriate.</p>
         </div>
         <div>
           <label class="font-label-bold text-label-bold text-on-surface">Name</label>
@@ -555,11 +991,21 @@
         </div>
         <div>
           <label class="font-label-bold text-label-bold text-on-surface">How do they count it?</label>
-          <select id="ma-custom-type" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
+          <select id="ma-custom-type" onchange="updateManagedCustomTargetFields()" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md">
             <option value="reps">Reps</option>
             <option value="distance">Distance</option>
             <option value="duration">Time</option>
           </select>
+        </div>
+        <div class="grid grid-cols-2 gap-sm">
+          <div id="ma-custom-sets-wrap">
+            <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
+            <input id="ma-custom-sets" type="number" min="1" value="2" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+          </div>
+          <div>
+            <label id="ma-custom-amount-label" class="font-label-bold text-label-bold text-on-surface">Reps</label>
+            <input id="ma-custom-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+          </div>
         </div>
         <button onclick="submitManagedCustomAdd()" class="bg-black/5 hover:bg-black/10 text-on-background rounded-full py-sm font-label-bold text-label-bold">Add Custom Exercise</button>
       </div>
@@ -625,7 +1071,7 @@
     <div class="p-md flex flex-col gap-md">
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Age</label>
-        <input id="pm-age" type="number" min="18"
+        <input id="pm-age" type="number" min="1"
           class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
       </div>
       <div class="flex flex-col gap-sm">
@@ -649,10 +1095,53 @@
   </div>
 </div>
 
+<!-- ════════ FORGOT PASSWORD MODAL (first-layer overlay) ════════ -->
+<div id="forgot-pw-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeForgotPasswordModal()">
+  <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-md overflow-hidden flex flex-col">
+    <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center">
+          <span class="material-symbols-outlined text-base">lock_reset</span>
+        </div>
+        <h3 class="font-headline-sm text-headline-sm text-on-surface">Forgot Password</h3>
+      </div>
+      <button onclick="closeForgotPasswordModal()" aria-label="Close"
+        class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined text-lg">close</span>
+      </button>
+    </div>
+
+    <div class="p-md flex flex-col gap-md">
+      <p class="font-body-md text-xs text-on-surface-variant leading-relaxed">
+        Enter your account email. We will send a secure password reset link from <span class="text-on-surface font-semibold">ayush.kumar@vitainspire.com</span>.
+      </p>
+
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Email Address</label>
+        <input id="fp-email" type="email" placeholder="you@example.com" autocomplete="email"
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+      </div>
+
+      <div id="fp-err" class="hidden rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs"></div>
+      <div id="fp-success" class="hidden rounded-lg px-md py-sm font-body-md bg-emerald-100 text-emerald-800 text-xs leading-relaxed"></div>
+
+      <div class="flex flex-col gap-2 pt-1">
+        <button id="fp-submit-btn" onclick="submitForgotPassword()" class="w-full bg-primary-fixed text-on-primary-fixed font-label-bold text-label-bold py-md rounded-full shadow-md active:scale-95 transition-all">
+          Send Reset Link
+        </button>
+        <button type="button" onclick="closeForgotPasswordModal()" class="w-full font-label-sm text-xs text-on-surface-variant py-1 hover:text-on-surface">
+          Back
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ════════ CHANGE PASSWORD MODAL (first-layer overlay) ════════ -->
 <div id="pw-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
      onclick="if (event.target === this) closePasswordEditor()">
-  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
+  <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
       <h3 class="font-headline-sm text-headline-sm text-on-surface">Change Password</h3>
       <button onclick="closePasswordEditor()" aria-label="Close"
@@ -662,28 +1151,81 @@
     </div>
     <div class="p-md flex flex-col gap-md">
       <div id="pw-current-wrap">
-        <label class="font-label-bold text-label-bold text-on-surface">Current Password</label>
-        <input id="pw-current" type="password" autocomplete="current-password"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
-      </div>
-      <div id="pw-reset-wrap" class="hidden">
-        <label class="font-label-bold text-label-bold text-on-surface">Reset Code</label>
-        <input id="pw-reset-code" type="text" autocomplete="one-time-code"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
-        <p class="font-label-sm text-label-sm text-on-surface-variant mt-1">Sent to your email.</p>
-      </div>
-      <div>
-        <label class="font-label-bold text-label-bold text-on-surface">New Password</label>
-        <input id="pw-new" type="password" autocomplete="new-password"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
-        <div class="flex items-center justify-between mt-1">
-          <p class="font-label-sm text-label-sm text-on-surface-variant">Minimum 10 characters.</p>
-          <button type="button" id="pw-forgot-link" onclick="toggleForgotPassword()" class="font-label-sm text-label-sm text-primary">Forgot your password?</button>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Current Password</label>
+        <div class="relative mt-xs">
+          <input id="pw-current" type="password" autocomplete="current-password" placeholder="Enter current password"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('pw-current', 'pw-current-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="pw-current-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
         </div>
       </div>
-      <p id="pw-err" class="hidden font-body-md text-on-error-container bg-error-container rounded px-sm py-xs"></p>
-      <button onclick="savePassword()" class="w-full bg-primary text-on-primary py-md rounded-full font-label-bold text-label-bold hover:opacity-90">
-        Save
+      <div id="pw-reset-wrap" class="hidden">
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Reset Code</label>
+        <input id="pw-reset-code" type="text" autocomplete="one-time-code" placeholder="Paste reset code"
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+        <p class="font-label-sm text-[11px] text-on-surface-variant mt-1">Sent to your email from ayush.kumar@vitainspire.com.</p>
+      </div>
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">New Password</label>
+        <div class="relative mt-xs">
+          <input id="pw-new" type="password" autocomplete="new-password" placeholder="Enter new password"
+            oninput="checkPasswordRules('pw-new', 'pw-confirm', 'p')"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('pw-new', 'pw-new-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="pw-new-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
+        </div>
+      </div>
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface text-xs">Confirm New Password</label>
+        <div class="relative mt-xs">
+          <input id="pw-confirm" type="password" autocomplete="new-password" placeholder="Type new password again"
+            oninput="checkPasswordRules('pw-new', 'pw-confirm', 'p')"
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          <button type="button" onclick="togglePasswordVisibility('pw-confirm', 'pw-confirm-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
+            <span id="pw-confirm-eye" class="material-symbols-outlined text-lg">visibility</span>
+          </button>
+        </div>
+        <div class="flex items-center justify-between mt-1.5">
+          <button type="button" id="pw-forgot-link" onclick="openForgotPasswordModal()" class="font-label-sm text-xs text-primary hover:underline">Forgot your password?</button>
+        </div>
+      </div>
+
+      <!-- Live password criteria for settings modal -->
+      <div class="bg-surface-container-low/70 rounded-xl p-3 border border-outline-variant/30 space-y-1 text-xs">
+        <p class="font-bold text-on-surface text-[11px] mb-1">Requirements:</p>
+        <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
+          <div id="p-rule-upper" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Capital (A-Z)</span>
+          </div>
+          <div id="p-rule-lower" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Small (a-z)</span>
+          </div>
+          <div id="p-rule-number" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Number (0-9)</span>
+          </div>
+          <div id="p-rule-special" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>1 Special char</span>
+          </div>
+          <div id="p-rule-length" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>Min 10 chars</span>
+          </div>
+          <div id="p-rule-match" class="flex items-center gap-1 text-secondary">
+            <span class="material-symbols-outlined text-[13px]">radio_button_unchecked</span>
+            <span>Passwords match</span>
+          </div>
+        </div>
+      </div>
+
+      <p id="pw-err" class="hidden font-body-md text-on-error-container bg-error-container rounded px-sm py-xs text-xs"></p>
+      <button onclick="savePassword()" class="w-full bg-primary-fixed text-on-primary-fixed py-md rounded-full font-label-bold text-label-bold shadow-md hover:opacity-90 active:scale-95 transition-all">
+        Save Password
       </button>
     </div>
   </div>
@@ -724,8 +1266,20 @@
       </div>
 
       <div id="custom-type-wrap" class="hidden">
-        <label class="font-label-bold text-label-bold text-on-surface">How do you count it?</label>
-        <div id="custom-type-chips" class="flex flex-wrap gap-xs mt-xs"></div>
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">How do you count it?</label>
+          <div id="custom-type-chips" class="flex flex-wrap gap-xs mt-xs"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-sm mt-md">
+          <div id="custom-target-sets-wrap">
+            <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
+            <input id="custom-target-sets" type="number" min="1" value="2" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+          </div>
+          <div>
+            <label id="custom-target-amount-label" class="font-label-bold text-label-bold text-on-surface">Reps</label>
+            <input id="custom-target-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+          </div>
+        </div>
       </div>
 
       <p id="custom-err" class="hidden font-body-md text-on-error-container bg-error-container rounded px-sm py-xs"></p>
@@ -733,6 +1287,115 @@
       <button id="custom-continue-btn" onclick="customContinue()" class="w-full bg-primary text-on-primary py-md rounded-full font-label-bold text-label-bold hover:opacity-90">
         Continue
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ ADD-EXERCISE TARGET POPUP (self-service) — same sets/amount +
+     auto-upgrade choice the managed-add modal already gives a manager, now
+     for a user adding to their own plan from the catalogue above. ════════ -->
+<div id="catalogue-add-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeCatalogueAddEditor()">
+  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 shrink-0">
+      <h3 id="ca-title" class="font-headline-sm text-headline-sm text-on-surface">Add exercise</h3>
+      <button onclick="closeCatalogueAddEditor()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="pl-md pr-lg py-md flex flex-col gap-md overflow-y-auto">
+      <div id="ca-uniform-wrap" class="grid grid-cols-2 gap-sm">
+        <div id="ca-sets-wrap">
+          <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
+          <input id="ca-sets" type="number" min="1" value="1" oninput="renderCaPerSetInputs()" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+        <div>
+          <label id="ca-amount-label" class="font-label-bold text-label-bold text-on-surface">Amount</label>
+          <input id="ca-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+      </div>
+
+      <!-- Reps-only: let a set-by-set breakdown replace the single uniform
+           amount above (e.g. a 12/10/8 pyramid instead of 10/10/10). -->
+      <label id="ca-per-set-toggle-wrap" class="hidden flex items-center justify-between py-xs">
+        <span id="ca-per-set-toggle-label" class="font-body-md text-on-surface">Different amount for each set</span>
+        <input id="ca-per-set-toggle" type="checkbox" onchange="toggleCaPerSet()" class="w-5 h-5">
+      </label>
+      <div id="ca-per-set-inputs" class="hidden flex flex-col gap-xs"></div>
+
+      <label id="ca-auto-wrap" class="flex items-center justify-between py-xs">
+        <span class="font-body-md text-on-surface">Let the app adjust this automatically</span>
+        <input id="ca-auto" type="checkbox" checked class="w-5 h-5">
+      </label>
+      <button onclick="submitCatalogueAdd()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ PLAYER EDIT-TARGET POPUP — replaces native window.prompt()
+     dialogs for the pencil/Edit button in the Workout Player header. ════════ -->
+<div id="pl-edit-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closePlayerEditModal()">
+  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 shrink-0">
+      <h3 id="pe-title" class="font-headline-sm text-headline-sm text-on-surface">Edit target</h3>
+      <button onclick="closePlayerEditModal()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="pl-md pr-lg py-md flex flex-col gap-md overflow-y-auto">
+      <div id="pe-sets-wrap" class="grid grid-cols-2 gap-sm">
+        <div>
+          <label class="font-label-bold text-label-bold text-on-surface">Sets</label>
+          <input id="pe-sets" type="number" min="1" oninput="renderPePerSetInputs()" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+        <div>
+          <label id="pe-amount-label" class="font-label-bold text-label-bold text-on-surface">Amount</label>
+          <input id="pe-amount" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+        </div>
+      </div>
+      <div id="pe-amount-only-wrap" class="hidden">
+        <label id="pe-amount-only-label" class="font-label-bold text-label-bold text-on-surface">Amount</label>
+        <input id="pe-amount-only" type="number" step="any" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+      </div>
+
+      <label id="pe-per-set-toggle-wrap" class="hidden flex items-center justify-between py-xs">
+        <span id="pe-per-set-toggle-label" class="font-body-md text-on-surface">Different amount for each set</span>
+        <input id="pe-per-set-toggle" type="checkbox" onchange="togglePePerSet()" class="w-5 h-5">
+      </label>
+      <div id="pe-per-set-inputs" class="hidden flex flex-col gap-xs"></div>
+
+      <label id="pe-auto-wrap" class="flex items-center justify-between py-xs">
+        <span class="font-body-md text-on-surface">Let the app adjust this automatically</span>
+        <input id="pe-auto" type="checkbox" class="w-5 h-5">
+      </label>
+      <button onclick="submitPlayerEdit()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ GPS: NO SIGNAL / NO MOVEMENT RECORDED — replaces the native
+     prompt() asking for a manual distance when standalone GPS tracking
+     (not linked to the Workout Player) recorded 0.00 km. ════════ -->
+<div id="gps-manual-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) discardGpsManualDistance()">
+  <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30">
+      <h3 class="font-headline-sm text-headline-sm text-on-surface">No distance recorded</h3>
+      <button onclick="discardGpsManualDistance()" aria-label="Close" class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant shrink-0">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="p-md flex flex-col gap-md">
+      <p id="gm-message" class="font-body-md text-body-md text-on-surface-variant">GPS recorded 0.00 km. Enter the distance yourself, or discard this activity.</p>
+      <div>
+        <label class="font-label-bold text-label-bold text-on-surface">Distance (km)</label>
+        <input id="gm-distance" type="number" step="any" min="0" value="1.0" class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md text-center">
+      </div>
+      <div class="grid grid-cols-2 gap-sm">
+        <button onclick="discardGpsManualDistance()" class="bg-surface-container text-on-surface rounded-full py-sm font-label-bold text-label-bold">Discard</button>
+        <button onclick="submitGpsManualDistance()" class="bg-primary text-on-primary rounded-full py-sm font-label-bold text-label-bold">Save</button>
+      </div>
     </div>
   </div>
 </div>
@@ -788,6 +1451,7 @@
 </div>
 
 </div><!-- /.mobile-frame -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>

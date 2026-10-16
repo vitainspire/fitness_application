@@ -1,9 +1,10 @@
 """HTTP surface for Modules 3, 4, 6, 13, 14."""
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from app.gateway.middleware import enforce_public_read_rate_limits, require_auth, require_staff
 from app.platform.db import session_scope
@@ -48,6 +49,14 @@ def _str_field(d: dict, key: str, default: str = "") -> str:
 
 def _optional_str_field(d: dict, key: str) -> str | None:
     return _str_field(d, key) or None
+
+
+def _optional_bool_field(d: dict, key: str) -> bool | None:
+    """Absent/None means "leave this field unchanged" — distinct from an
+    explicit false, same reasoning as _optional_number_list_field above."""
+    if key not in d or d[key] is None:
+        return None
+    return bool(d[key])
 
 
 def _float_field(d: dict, *keys: str, default: float = 0.0) -> float:
@@ -223,6 +232,7 @@ def add_program_entry():
         return jsonify(service.add_program_entry(
             s, g.user_id, _str_field(d, "activity_type"),
             override_confirmed=bool(d.get("override_confirmed")),
+            auto_progress=bool(d.get("auto_progress", True)),
         ))
 
 
@@ -236,19 +246,29 @@ def remove_program_entry(activity_type: str):
 @bp.put("/program/entries/<activity_type>/target")
 @require_auth
 def set_managed_target(activity_type: str):
-    """Manager-only: directly set a managed entry's target, overriding
-    whatever the app would otherwise propose. See
-    MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §4."""
+    """Directly set an entry's target, overriding whatever the app would
+    otherwise propose. With managed_user_id: a manager setting a managed
+    person's target (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §4). Without
+    it: a user correcting their own — e.g. undoing a mistake or just wanting
+    a different number than the default, same as a manager can already do."""
     d = _body()
     managed_user_id = d.get("managed_user_id")
-    if not isinstance(managed_user_id, str) or not managed_user_id:
-        raise ValidationError("managed_user_id is required.")
     with session_scope() as s:
-        return jsonify(service.set_managed_target(
-            s, g.user_id, managed_user_id, activity_type,
-            target_sets=_int_field(d, "target_sets", 1),
-            target_amount=_float_field(d, "target_amount"),
-        ))
+        if isinstance(managed_user_id, str) and managed_user_id:
+            result = service.set_managed_target(
+                s, g.user_id, managed_user_id, activity_type,
+                target_sets=_int_field(d, "target_sets", 1),
+                target_amount=_float_field(d, "target_amount"),
+            )
+        else:
+            result = service.set_own_target(
+                s, g.user_id, activity_type,
+                target_sets=_int_field(d, "target_sets", 1),
+                target_amount=_float_field(d, "target_amount"),
+                set_amounts=_optional_number_list_field(d, "set_amounts"),
+                auto_progress=_optional_bool_field(d, "auto_progress"),
+            )
+        return jsonify(result)
 
 
 @bp.get("/suggestions")
@@ -306,6 +326,45 @@ def log():
         return jsonify({"logged": out, "streak": service.streak(s, g.user_id)}), 201
 
 
+@bp.post("/soreness/report")
+@require_auth
+def report_soreness_route():
+    d = _body()
+    activity_type = _str_field(d, "activity_type")
+    with session_scope() as s:
+        return jsonify(service.report_soreness(s, g.user_id, activity_type))
+
+
+@bp.post("/soreness/clear")
+@require_auth
+def clear_soreness_route():
+    d = _body()
+    activity_type = _str_field(d, "activity_type")
+    with session_scope() as s:
+        return jsonify(service.clear_soreness(s, g.user_id, activity_type))
+
+
+@bp.get("/soreness/status")
+@require_auth
+def soreness_status_route():
+    with session_scope() as s:
+        return jsonify({"items": service.list_soreness_status(s, g.user_id)})
+
+
+@bp.post("/water-intake/add")
+@require_auth
+def add_water_glass_route():
+    with session_scope() as s:
+        return jsonify(service.add_water_glass(s, g.user_id))
+
+
+@bp.get("/water-intake/today")
+@require_auth
+def water_today_route():
+    with session_scope() as s:
+        return jsonify(service.get_water_today(s, g.user_id))
+
+
 @bp.post("/workout-sessions")
 @require_auth
 def start_workout_session():
@@ -339,20 +398,18 @@ def custom_exercises():
 def create_custom_exercise():
     d = _body()
     managed_user_id = d.get("managed_user_id")
+    kwargs = dict(
+        name=_str_field(d, "name"),
+        measurement_type=_str_field(d, "measurement_type"),
+        target_amount=_float_field(d, "target_amount"),
+        target_sets=_int_field(d, "target_sets", 1),
+    )
     with session_scope() as s:
         if isinstance(managed_user_id, str) and managed_user_id:
             result = service.create_custom_exercise(
-                s, managed_user_id,
-                name=_str_field(d, "name"),
-                measurement_types=_list_field(d, "measurement_types"),
-                acting_manager_id=g.user_id,
-            )
+                s, managed_user_id, acting_manager_id=g.user_id, **kwargs)
         else:
-            result = service.create_custom_exercise(
-                s, g.user_id,
-                name=_str_field(d, "name"),
-                measurement_types=_list_field(d, "measurement_types"),
-            )
+            result = service.create_custom_exercise(s, g.user_id, **kwargs)
         return jsonify(result), 201
 
 
@@ -428,6 +485,7 @@ def dashboard_activity_detail():
 @require_auth
 def dashboard():
     with session_scope() as s:
+        service.auto_restore_stale_soreness(s, g.user_id)
         return jsonify({
             "streak": service.streak(s, g.user_id),
             "week": service.weekly_volume(s, g.user_id),
@@ -458,6 +516,17 @@ def videos():
         return jsonify(service.video_library(s, g.user_id))
 
 
+@bp.get("/exercise-library")
+@require_auth
+def exercise_library():
+    """Browsable reference library pulled from ExerciseDB -- separate from
+    video_library() above, which only covers the 12 activities our plans
+    actually prescribe. This is just "what does X look like" reference
+    content, not tied to any user's program."""
+    with session_scope() as s:
+        return jsonify(service.exercise_library(s, g.user_id))
+
+
 @bp.put("/admin/videos/<activity_type>")
 @require_auth
 @require_staff
@@ -475,3 +544,31 @@ def curate_video(activity_type: str):
             url_or_id=_str_field(d, "url"),
             title=_optional_str_field(d, "title"),
         ))
+
+
+@bp.post("/admin/progression/run-daily")
+def trigger_daily_progression():
+    """Trigger the daily progression batch job.
+    Accessible with a valid CRON_SECRET header (X-Cron-Secret) or by authenticated staff."""
+    cron_secret = os.environ.get("CRON_SECRET", "").strip()
+    provided_secret = request.headers.get("X-Cron-Secret", "").strip()
+
+    is_authorized = False
+    if cron_secret and provided_secret and cron_secret == provided_secret:
+        is_authorized = True
+    else:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header:
+            try:
+                require_auth(lambda: None)()
+                require_staff(lambda: None)()
+                is_authorized = True
+            except Exception:
+                is_authorized = False
+
+    if not is_authorized:
+        return jsonify({"error": {"code": "unauthorized", "message": "Missing or invalid authorization."}}), 401
+
+    result = progression_service.run_daily_progression_batch()
+    return jsonify(result), 200
+

@@ -127,9 +127,12 @@ def test_condition_gate_safe_when_no_avoid_verdicts(make_user):
         assert gate == {"checked": True, "cached": False, "safe": True}
 
 
-def test_condition_gate_unsafe_when_grid_says_avoid(make_user):
-    """herniated_disk x hamstring_stretch is a real `avoid` cell in the grid
-    (same combination used in tests/test_progression_engine.py)."""
+def test_condition_gate_unsafe_when_grid_says_avoid(make_user, force_avoid_cell):
+    """herniated_disk x hamstring_stretch is forced to an `avoid` cell for
+    this test (same combination used in tests/test_progression_engine.py) —
+    see conftest.py's force_avoid_cell for why this isn't the real grid data
+    anymore."""
+    force_avoid_cell("herniated_disk", "hamstring_stretch")
     user = make_user(condition_codes=["herniated_disk"])
     with session_scope() as s:
         gate = _condition_gate(s, user["user_id"], "hamstring_stretch")

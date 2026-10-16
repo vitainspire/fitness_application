@@ -31,13 +31,14 @@ from sqlalchemy.orm import Session
 
 from app.catalog.models import ActivityTaxonomy, Condition, SafetyGridCell
 from app.platform import redis_clients as rc
-from app.platform.errors import QuotaExhausted, RateLimited, ValidationError
+from app.platform.errors import Forbidden, QuotaExhausted, RateLimited, ValidationError
 from app.profile.models import ActivityLog, UserCondition, UserProfile, UserProgram
 from app.profile.service import (
     IST, REFERRAL_MESSAGE, activity_log_date_bounds, activity_log_detail,
     complete_onboarding, is_referred, restore_program_activities,
     set_program_to_activities, today_ist,
 )
+from app.relationships.service import is_managed_account
 from app.progression import analysis as progression_analysis
 from app.progression import service as progression_service
 from app.rag import vectorstore
@@ -262,6 +263,7 @@ DOSAGE_PATTERN = re.compile(
 
 SURGERY_KEYWORDS = [
     "laminectomy", "discectomy", "spinal fusion", "microdiscectomy",
+    "decompression", "decompressive",
     "arthroscopy", "arthroscopic", "arthroplasty", "carpal tunnel release",
     "fasciotomy", "reconstruction", "open surgery", "surgical repair",
 ]
@@ -453,7 +455,7 @@ def _enforce_approved_exercises_only(session: Session, answer: str,
         return NO_APPROVED_EXERCISE_ANSWER, True
     alternatives = ", ".join(approved)
     return (
-        f"I can't recommend {offending} for your condition — it isn't on your approved "
+        f"I can't recommend that exercise for your condition — it isn't on your approved "
         f"exercise list. Exercises that ARE approved for you: {alternatives}. Ask me about "
         f"any of these instead."
     ), True
@@ -644,7 +646,17 @@ def _save_chat_log(session: Session, user_id: str, question: str, answer: str) -
     session.flush()
 
 
+def _require_not_managed(session: Session, user_id: str) -> None:
+    """A managed account (child/student/patient on someone else's plan) has
+    no business talking to the rehab chatbot on their own — the plan is
+    built and monitored by whoever manages them, same reasoning as
+    app.profile.service.exercise_library's own guard."""
+    if is_managed_account(session, user_id):
+        raise Forbidden("Ask the person managing your plan about this.")
+
+
 def chat_history(session: Session, user_id: str, limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
+    _require_not_managed(session, user_id)
     rows = session.scalars(
         select(RehabChatLog).where(RehabChatLog.user_id == user_id)
         .order_by(RehabChatLog.created_at.desc()).limit(limit)
@@ -662,6 +674,7 @@ def _reset_at_iso() -> str:
 
 
 def remaining_quota(session: Session, user_id: str) -> dict:
+    _require_not_managed(session, user_id)
     row = session.get(RehabQuota, (user_id, QUOTA_TYPE, today_ist()))
     used = row.count if row else 0
     return {
@@ -1624,6 +1637,7 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
                   escalation_confirmation: dict | None = None,
                   program_confirmation: dict | None = None,
                   revert_confirmation: dict | None = None, rlm_enabled: bool = True) -> dict:
+    _require_not_managed(session, user_id)
     # A tap confirming (or declining) an escalation proposal (16.5) — a
     # question-less UI action, so this is handled before the "ask a question
     # first" validation below even applies.

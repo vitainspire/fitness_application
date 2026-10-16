@@ -2,9 +2,14 @@
 
 Derived from the finalized system architecture. Target scale: **1,000 users**.
 
-**Market: India only. Single timezone (IST). Adults 18+ only.** These three constraints
-simplify several designs — see 8.1 (daily rather than hourly scheduling) and *Out of
-Scope* item 8 (age gate).
+**Market: India only. Single timezone (IST). No age floor — any age may sign up.**
+These constraints simplify several designs — see 8.1 (daily rather than hourly
+scheduling). The age floor that was originally planned here (18+) was deliberately
+removed in a later product decision so a managed account (a child, student, or
+patient set up by a parent/teacher/doctor through Managed Plans) could be any age;
+the decision was then extended to self-signup too, so no account anywhere in the
+app enforces a minimum age. See *Out of Scope* item 17 for the compliance follow-up
+this still leaves open (parental consent / youth data handling).
 
 **Governing principle: the LLM never selects an exercise.** Every exercise a user is
 shown or given comes from a reviewed table with a named reviewer and a date. The model
@@ -165,7 +170,7 @@ Single Redis lookup covering both conditions:
 flow now collects conditions from a closed list, not free-text pain history — 3.2)*
 
 ### 3.1 Onboarding Intake
-- Collect: age (18+ gate), fitness goal, experience band, and **health conditions —
+- Collect: age (no minimum — see *Out of Scope* item 17), fitness goal, experience band, and **health conditions —
   selected from a closed list, never free text** (3.2)
 - Persist to PostgreSQL
 - Return explicit "profile saved" confirmation to client
@@ -617,7 +622,7 @@ in STRATEGY_AND_OPS.md).
   handle rotation correctly (always store the newly returned refresh token)
 
 ### 11.2 Onboarding Flow
-- Age (18+ gate), fitness goal, experience band, and **health conditions chosen from the
+- Age (no minimum — see *Out of Scope* item 17), fitness goal, experience band, and **health conditions chosen from the
   closed pick-list** (3.2) — **never a free-text field**
 - If a Refer-bucket condition or "something else" is selected → show the referral
   message; do not build a program (13.3b)
@@ -1461,7 +1466,7 @@ entities, relationships, and constraints below are requirements.
 | Table | Key fields | Notes |
 |---|---|---|
 | `users` | `id`, `email` **UNIQUE**, `password_hash`, `email_verified_at`, `deleted_at` | Soft-delete via `deleted_at` (1.10) |
-| `user_profiles` | `user_id` FK, `age`, `fitness_goals`, `experience_band`, `unit_preference` | Age 18+ enforced at signup. No per-user timezone — IST throughout (3.3) |
+| `user_profiles` | `user_id` FK, `age`, `fitness_goals`, `experience_band`, `unit_preference` | No age floor (any age may sign up or be set up as a managed account — see *Out of Scope* item 17). No per-user timezone — IST throughout (3.3) |
 | `conditions` | `id`, `name`, `bucket` (`supported`\|`refer`), `display_order` | The closed list (3.2). **Includes real rows for `none` and `other_unlisted`** — without them the fail-closed choice cannot be stored. No free text anywhere |
 | `user_conditions` | `user_id` FK, `condition_id` FK, `recorded_at` | Multi-row per user; **sensitive — in scope for deletion (1.10)** |
 | `safety_grid` | PK(`condition_id`, `activity_type`), `verdict` (`safe`\|`avoid`\|`modify`), `reviewer`, `version`, `reviewed_at` | 13.3. **CI asserts complete coverage** — every supported condition × every activity |
@@ -1674,9 +1679,18 @@ the exclusion table has been exercised against real users and is trusted.
 16. **Which ~10 conditions ship in v1** — deliberately keep this small. Ten fully
     reviewed conditions beat twenty half-reviewed ones, and it is what makes the
     reviewer's job finishable. Everything else sits in *Refer* or is not shown.
-17. **Age gate** — 18+ only is assumed throughout. Accepting minors would bring
-    parental consent requirements, different data rules, and different exercise
-    guidance. Confirm and enforce at signup.
+17. **Age gate — removed, not just undecided.** This was originally an 18+-only
+    assumption throughout; it was deliberately dropped (DB migration
+    `e1f2a3b4c5d6_remove_adults_only_age_floor`, age check now `age >= 1` everywhere)
+    so Managed Plans could support an actual child/student/patient. The removal was
+    then extended to self-signup as well, so there is no minimum age anywhere in the
+    app today. **This still leaves the real compliance question the original item
+    was flagging genuinely open and unresolved**: accepting minors brings parental
+    consent requirements and different data-handling rules (COPPA-type exposure for
+    a product with any US reach) that have not been built or reviewed. Someone
+    should own resolving this — either building real parental-consent/youth-data
+    handling, or deciding the product risk is acceptable for the current scale —
+    before this goes in front of users outside the team.
 
 ---
 

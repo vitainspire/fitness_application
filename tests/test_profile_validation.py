@@ -32,13 +32,11 @@ def test_non_list_condition_codes_returns_422_not_500(make_user, client):
     assert r.status_code == 422
 
 
-def test_bare_string_measurement_types_returns_422_not_a_confusing_error(make_user, client):
-    """A bare string is technically iterable (as characters) — must be
-    rejected as the wrong type, not silently iterated character by character."""
+def test_non_string_measurement_type_returns_422_not_500(make_user, client):
     user = make_user()
     r = client.post(
         "/v1/custom-exercises",
-        json={"name": "My Exercise", "measurement_types": "reps"},
+        json={"name": "My Exercise", "measurement_type": ["reps"], "target_amount": 10},
         headers=user["headers"],
     )
     assert r.status_code == 422
