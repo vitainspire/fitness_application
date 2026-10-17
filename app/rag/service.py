@@ -917,6 +917,11 @@ work it out from today's own weekday given above, don't guess.
 above, not a guess — use that exact date.
   - A short follow-up with no date of its own ("what about the day before that") is relative \
 to the previous message below.
+  - If the message names MORE THAN ONE specific day or relative time in the same question \
+(e.g. "day before yesterday and 3 days ago", "Monday and Wednesday"), this is still exactly \
+one activity_recall, not two separate questions: set start_date to the EARLIEST of the named \
+days and end_date to TODAY above (not just the latest named day) — the user wants one combined \
+catch-up across that whole stretch.
 - "performance": the user is asking about their own progress, trend, or whether they're \
 improving, plateaued, or ready to do more — e.g. "how am I doing", "analyze my growth", \
 "can I do more this week". start_date and end_date should be null.
@@ -1054,6 +1059,49 @@ def _classify_data_intent(session: Session, user_id: str, question: str, *,
     return {"intent": "activity_recall", "start_date": start, "end_date": end}
 
 
+def _recall_amount_text(e: dict) -> str:
+    """One entry's amount in plain words, with the real per-set numbers instead of
+    an average: \"3 sets of 10, 10 and 11 reps (31 in total)\", \"2 sets of 11 reps
+    (22 in total)\", \"2.5 km\". A blended average (3 x 10.33) was never the
+    figure for any single set."""
+    unit = "reps" if e["unit"] == "count" else e["unit"]
+    fmt = lambda v: f"{v:g}"
+    per_set = e.get("set_amounts")
+    if not per_set:
+        if e["sets"] <= 1:
+            return f"{fmt(e['amount'])} {unit}"
+        per_set = [e["amount"]] * e["sets"]   # an entry without a breakdown is uniform
+    n = len(per_set)
+    total = fmt(sum(per_set))
+    if n == 1:
+        return f"{fmt(per_set[0])} {unit}"
+    if len(set(per_set)) == 1:
+        values = fmt(per_set[0])
+    else:
+        values = ", ".join(fmt(v) for v in per_set[:-1]) + " and " + fmt(per_set[-1])
+    return f"{n} sets of {values} {unit} ({total} in total)"
+
+
+def _recall_group_text(group: list[dict]) -> str:
+    """One exercise's entries for one day. A single entry reads as before; several
+    become \"3 entries, 3 km in total (1, 1.5 and 0.5 km)\" so the answer says how
+    much was done overall instead of repeating the exercise on every line."""
+    if len(group) == 1:
+        return _recall_amount_text(group[0])
+    unit = "reps" if group[0]["unit"] == "count" else group[0]["unit"]
+    total = round(sum(e["total_volume"] for e in group), 2)
+    text = f"{len(group)} entries, {total:g} {unit} in total"
+    if len(group) <= 5:
+        single = all(e["sets"] <= 1 and not e.get("set_amounts") for e in group)
+        if single:
+            vals = [f"{e['amount']:g}" for e in group]
+            joined = vals[0] if len(vals) == 1 else ", ".join(vals[:-1]) + " and " + vals[-1]
+            text += f" ({joined} {unit})"
+        else:
+            text += " (" + "; ".join(_recall_amount_text(e) for e in group) + ")"
+    return text
+
+
 def _activity_recall_answer(session: Session, user_id: str, start: date, end: date) -> str:
     """The user-facing answer for an activity_recall question, built directly
     from real data — deliberately NOT run through the answer-writing LLM.
@@ -1074,10 +1122,15 @@ def _activity_recall_answer(session: Session, user_id: str, start: date, end: da
     if not entries:
         return f"Nothing logged for {label}."
     single_day = start == end
+    # Same exercise on the same day collapses to one line (entries arrive newest
+    # first; the first appearance fixes the line's position).
+    groups: dict[tuple, list[dict]] = {}
+    for e in entries:
+        groups.setdefault((e['date'], e['name']), []).append(e)
     lines = "\n".join(
-        f"- {e['name']} — {e['sets']} x {e['amount']} {e['unit']}" if single_day else
-        f"- {e['date']}: {e['name']} — {e['sets']} x {e['amount']} {e['unit']}"
-        for e in entries
+        f"- {name} — {_recall_group_text(g)}" if single_day else
+        f"- {day}: {name} — {_recall_group_text(g)}"
+        for (day, name), g in groups.items()
     )
     return f"Your activity for {label}:\n{lines}"
 

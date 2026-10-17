@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import uuid
 import math
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
@@ -138,7 +139,8 @@ def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
                         experience_band: str, condition_codes: list[str],
                         unit_preference: str = "km",
                         build_default_program: bool = True,
-                        min_age: int = 1) -> dict:
+                        min_age: int = 1,
+                        confirm_rescale: bool = False) -> dict:
     """build_default_program=False: managed plans
     (MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md) — a manager-curated plan
     must consist of exactly what the manager staged, never also the generic
@@ -179,6 +181,15 @@ def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
     if not codes:
         codes = ["none"]
 
+    # A re-run with a different experience level rescales the existing plan
+    # (see rescale_plan_for_level). Moving DOWN asks first, and that check has
+    # to happen before anything below is written.
+    previous = session.get(UserProfile, user_id)
+    previous_band = previous.experience_band if previous else None
+    level_changed = previous_band is not None and previous_band != experience_band
+    if level_changed and _is_level_down(previous_band, experience_band) and not confirm_rescale:
+        return _level_down_confirmation()
+
     session.merge(UserProfile(
         user_id=user_id, age=age, goal=goal,
         experience_band=experience_band, unit_preference=unit_preference,
@@ -215,13 +226,117 @@ def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
         .values(status="active", suspended_reason=None)
     )
     program = build_program(session, user_id) if build_default_program else []
-    return {"referred": False, "message": None, "program": program}
+    result = {"referred": False, "message": None, "program": program}
+    if level_changed and build_default_program:
+        result["plan_rescaled"] = rescale_plan_for_level(session, user_id, experience_band)
+        result["program"] = get_program(session, user_id)
+    return result
 
 
 UNIT_PREFERENCES = {"km", "mi"}
 
+BAND_ORDER = ["beginner", "1m", "2m", "3m", "experienced"]
+RESCALE_NEW_USER_DAYS = 14      # an account younger than this has no real history to learn from
+RESCALE_WINDOW_DAYS = 21        # "your last 3 weeks"
 
-def update_profile(session: Session, user_id: str, *, fields: dict) -> dict:
+
+def _is_level_down(old_band: str, new_band: str) -> bool:
+    return BAND_ORDER.index(new_band) < BAND_ORDER.index(old_band)
+
+
+def _level_down_confirmation() -> dict:
+    return {
+        "needs_confirmation": True, "reason": "level_down",
+        "message": ("You're moving to a lower experience level, so your plan will be "
+                    "adjusted to match. Continue?"),
+    }
+
+
+def _scaled_default_amount(t: ActivityTaxonomy, band: str):
+    """The taxonomy baseline scaled by an experience level — the same rule
+    build_program uses to seed a first plan and list_catalogue uses for the add
+    screen (beginner keeps the exact baseline)."""
+    from app.progression.service import _round_reps  # local: import cycle
+    from app.relationships.service import _EXPERIENCE_MULTIPLIER  # local: import cycle
+    mult = _EXPERIENCE_MULTIPLIER.get(band or "beginner", 1.0)
+    if mult == 1.0:
+        return t.default_amount
+    scaled = float(t.default_amount) * mult
+    return _round_reps(scaled) if t.prescription_type in ("reps", "hold") else round(scaled, 1)
+
+
+def rescale_plan_for_level(session: Session, user_id: str, new_band: str) -> list[dict]:
+    """Re-bases the user's current plan after their experience level changed.
+
+    - A NEW account (under RESCALE_NEW_USER_DAYS old, so no real history yet):
+      every exercise goes to the new level's starting numbers.
+    - Otherwise: each exercise goes to the best the user actually did in the last
+      RESCALE_WINDOW_DAYS days — highest reps in a single set (not the day's
+      total), longest hold, longest distance — never below the exercise's baseline
+      and never above its ceiling. An exercise with no entries in that window
+      falls back to the new level's starting numbers.
+
+    Only sets the user's own target: entries a manager controls, entries the user
+    fixed by turning auto-adjust off, soreness-reduced entries and anything not
+    currently active are left exactly as they are. Sets are not changed. Returns
+    a summary of what moved (empty if nothing did)."""
+    from app.progression.service import _round_reps  # local: import cycle
+    user = session.get(User, user_id)
+    created = user.created_at if user else None
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    is_new = created is None or (datetime.now(timezone.utc) - created).days < RESCALE_NEW_USER_DAYS
+
+    best: dict[str, float] = {}
+    if not is_new:
+        window_start = today_ist() - timedelta(days=RESCALE_WINDOW_DAYS)
+        for log in session.scalars(
+            select(ActivityLog).where(
+                ActivityLog.user_id == user_id,
+                ActivityLog.activity_type.is_not(None),
+                ActivityLog.local_date >= window_start,
+                ActivityLog.implausible.is_(False))
+        ).all():
+            value = float(max(log.set_amounts or [log.amount_per_set]))
+            if value > best.get(log.activity_type, 0.0):
+                best[log.activity_type] = value
+
+    rows = session.execute(
+        select(UserProgram, ActivityTaxonomy)
+        .join(ActivityTaxonomy, ActivityTaxonomy.activity_type == UserProgram.activity_type)
+        .where(UserProgram.user_id == user_id, UserProgram.status == "active")
+    ).all()
+    changes = []
+    for p, t in rows:
+        if (p.managed_by_relationship_id is not None or not p.auto_progress
+                or p.soreness_reduced_since is not None):
+            continue
+        if t.activity_type in best:
+            target = min(max(best[t.activity_type], float(t.default_amount)), float(t.max_amount))
+        else:
+            target = float(_scaled_default_amount(t, new_band))
+        new_amount = (_round_reps(target) if t.prescription_type in ("reps", "hold")
+                      else round(target, 2))
+        old_amount = float(p.target_amount)
+        if new_amount == old_amount:
+            continue  # nothing moves, so any per-set breakdown stays as it is
+        old_text = t.describe(p.target_sets, old_amount)
+        p.target_amount = Decimal(str(new_amount))
+        p.internal_target_amount = Decimal(str(new_amount))
+        # A fresh uniform target replaces any older per-set breakdown (same as
+        # set_own_target's uniform branch).
+        p.set_targets = None
+        p.internal_set_targets = None
+        changes.append({
+            "activity_type": t.activity_type, "display_name": t.display_name,
+            "old": old_text, "new": t.describe(p.target_sets, new_amount),
+        })
+    session.flush()
+    return changes
+
+
+def update_profile(session: Session, user_id: str, *, fields: dict,
+                   confirm_rescale: bool = False) -> dict:
     """3.4 — edit one or more simple fields without touching conditions or the
     program. Only age / goal / experience_band / unit_preference are settable
     here; anything else in `fields` is ignored rather than silently accepted.
@@ -229,6 +344,14 @@ def update_profile(session: Session, user_id: str, *, fields: dict) -> dict:
     prof = session.get(UserProfile, user_id)
     if prof is None:
         raise NotFound("Complete onboarding before editing your profile.")
+
+    # Changing the experience level rescales the plan. Moving DOWN asks first —
+    # decided before any field below is written, so an unconfirmed attempt
+    # saves nothing at all.
+    new_band = fields.get("experience_band")
+    level_changed = new_band in BANDS and new_band != prof.experience_band
+    if level_changed and _is_level_down(prof.experience_band, new_band) and not confirm_rescale:
+        return _level_down_confirmation()
 
     if "age" in fields:
         age = fields["age"]
@@ -258,7 +381,10 @@ def update_profile(session: Session, user_id: str, *, fields: dict) -> dict:
         prof.unit_preference = unit
 
     session.flush()
-    return profile_summary(session, user_id)
+    result = profile_summary(session, user_id)
+    if level_changed:
+        result["plan_rescaled"] = rescale_plan_for_level(session, user_id, new_band)
+    return result
 
 
 # --- Program ---------------------------------------------------------------
@@ -428,6 +554,23 @@ def build_program(session: Session, user_id: str) -> list[dict]:
         ).all()
     }
 
+    # A newly seeded exercise starts at the taxonomy baseline scaled by the user's
+    # experience level — the same scaling the add-exercise catalogue has always
+    # used (beginner 1.0x up to experienced 1.6x). It used to be applied only
+    # there, so an "experienced" user's first plan was identical to a beginner's.
+    # Only fresh seeds are scaled: an existing row (real, earned progress) is
+    # never touched, and a beginner keeps the exact baseline numbers.
+    from app.progression.service import _round_reps
+    from app.relationships.service import _EXPERIENCE_MULTIPLIER  # local: import cycle
+    prof = session.get(UserProfile, user_id)
+    multiplier = _EXPERIENCE_MULTIPLIER.get((prof.experience_band if prof else None) or "beginner", 1.0)
+
+    def seed_amount(t):
+        if multiplier == 1.0:
+            return t.default_amount
+        scaled = float(t.default_amount) * multiplier
+        return _round_reps(scaled) if t.prescription_type in ("reps", "hold") else round(scaled, 1)
+
     for row in session.scalars(select(ActivityTaxonomy)).all():
         entry = existing.get(row.activity_type)
         is_blocked = row.activity_type in blocked
@@ -438,7 +581,7 @@ def build_program(session: Session, user_id: str) -> list[dict]:
                     user_id=user_id,
                     activity_type=row.activity_type,
                     target_sets=row.default_sets,
-                    target_amount=row.default_amount,
+                    target_amount=seed_amount(row),
                     unit=row.amount_unit,
                     source="template",
                 ))
@@ -752,8 +895,61 @@ def add_program_entry(session: Session, user_id: str, activity_type: str,
     return {"added": True, "needs_confirmation": False, "program": get_program(session, user_id)}
 
 
+MAX_SETS_PER_TARGET = 100
+
+
+def normalize_set_amounts(t: ActivityTaxonomy, set_amounts: list[float]) -> list[float]:
+    """Validates and rounds a per-set target list (e.g. [12, 10, 8]) for a
+    taxonomy activity. Shared by the manager paths (live and staged) so the
+    rules live in one place; set_own_target above enforces the same rules
+    inline and is deliberately left as it was."""
+    from app.progression.service import _round_reps  # local: import cycle, see set_managed_target
+    if t.prescription_type not in ("reps", "hold"):
+        raise ValidationError(f"{t.display_name} doesn't support a different amount per set.")
+    if not set_amounts:
+        raise ValidationError("Provide at least one set.")
+    if len(set_amounts) > MAX_SETS_PER_TARGET:
+        raise ValidationError(f"At most {MAX_SETS_PER_TARGET} sets are supported.")
+    if any((not math.isfinite(v)) or round(v, 2) <= 0 for v in set_amounts):
+        raise ValidationError("Each set's amount must be greater than zero.")
+    if any(v > MAX_LOGGABLE_AMOUNT for v in set_amounts):
+        raise ValidationError(f"Each set's amount cannot exceed {MAX_LOGGABLE_AMOUNT}.")
+    if t.prescription_type == "reps":
+        return [_round_reps(v) for v in set_amounts]
+    return [round(v, 2) for v in set_amounts]
+
+
+def _apply_per_set_targets(session: Session, entry: UserProgram, t: ActivityTaxonomy,
+                           set_amounts: list[float]) -> dict:
+    """Writes a per-set breakdown onto a program entry — the same columns and
+    invariants as set_own_target's per-set branch (target_sets = len,
+    target_amount = average; reps activate the weekly per-set engine; a hold
+    stays fixed because that engine's growth math is rep-specific)."""
+    from app.progression.service import REPS_STANDARD_CEILING, _round_reps  # local: import cycle
+    rounded = normalize_set_amounts(t, set_amounts)
+    is_reps = t.prescription_type == "reps"
+    entry.set_targets = [Decimal(str(v)) for v in rounded]
+    entry.internal_set_targets = [Decimal(str(v)) for v in rounded]
+    if is_reps:
+        entry.reps_ceiling = Decimal(str(REPS_STANDARD_CEILING))
+    else:
+        entry.auto_progress = False
+    entry.target_sets = len(rounded)
+    avg = _round_reps(sum(rounded) / len(rounded)) if is_reps else round(sum(rounded) / len(rounded), 2)
+    entry.target_amount = Decimal(str(avg))
+    entry.internal_target_amount = Decimal(str(avg))
+    session.flush()
+    return {
+        "activity_type": entry.activity_type, "target_sets": entry.target_sets,
+        "target_amount": float(entry.target_amount),
+        "set_targets": [float(v) for v in entry.set_targets],
+        "auto_progress": entry.auto_progress,
+    }
+
+
 def set_managed_target(session: Session, manager_user_id: str, managed_user_id: str,
-                       activity_type: str, target_sets: int, target_amount: float) -> dict:
+                       activity_type: str, target_sets: int, target_amount: float,
+                       set_amounts: list[float] | None = None) -> dict:
     """The first-ever direct "set this exact number" write in the app — see
     MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md §4. Every other target change
     in this codebase only ever happens through the automated weekly job or a
@@ -772,6 +968,8 @@ def set_managed_target(session: Session, manager_user_id: str, managed_user_id: 
         raise NotFound(f"No entry for {activity_type} managed by this relationship.")
 
     t = session.get(ActivityTaxonomy, activity_type)
+    if set_amounts is not None:
+        return _apply_per_set_targets(session, entry, t, set_amounts)
     if round(target_amount, 2) <= 0:
         raise ValidationError("Amount must be greater than zero.")
     if target_sets < 1:
@@ -791,6 +989,10 @@ def set_managed_target(session: Session, manager_user_id: str, managed_user_id: 
     entry.target_sets = target_sets
     entry.target_amount = Decimal(str(target_amount))
     entry.internal_target_amount = Decimal(str(target_amount))
+    # Same as set_own_target: a fresh uniform target must not leave an older
+    # per-set breakdown behind to disagree with it.
+    entry.set_targets = None
+    entry.internal_set_targets = None
     session.flush()
     return {
         "activity_type": activity_type, "target_sets": entry.target_sets,
@@ -1065,57 +1267,65 @@ def _save_personal_best(session: Session, user_id: str, activity_type: str, valu
         session.delete(extra)
 
 
+def _personal_best_value(prescription_type: str | None, log: ActivityLog) -> float:
+    """The number a personal best is ranked by, in the exercise's own terms:
+    reps-based -> the most reps in a SINGLE set (sets of 24 and 20 give 24, not
+    44); hold (time) -> the longest single hold; distance / duration -> the amount
+    (one continuous effort). An entry with no per-set breakdown is uniform, so
+    its per-set amount is the best set."""
+    if prescription_type in ("reps", "hold"):
+        return float(max(log.set_amounts or [log.amount_per_set]))
+    return float(log.amount_per_set)
+
+
 def list_personal_bests(session: Session, user_id: str) -> dict:
-    """Grouped by activity_type, each list ordered best-first. Returns the user's
-    top records (up to 5) for each activity. Purely a celebratory display list —
-    never consulted by streak, progression, or adherence math."""
-    tax_names = {t.activity_type: t.display_name for t in session.scalars(select(ActivityTaxonomy)).all()}
-    custom_names = {c.id: c.name for c in session.scalars(select(CustomExercise).where(CustomExercise.user_id == user_id)).all()}
+    """Exactly ONE personal best per exercise the user has logged (8 exercises
+    done -> 8 records; never more, never fewer). Reps are ranked by the best single set. Derived from the saved entries
+    each time rather than stored, so it is always right after an entry is
+    corrected or replaced. Entries flagged implausible are ignored unless they
+    were kept as a genuine extraordinary effort (same rule as streak). Returned
+    as {exercise_key: [best]} — a one-item list, the shape existing clients read.
+    Purely a celebratory display; never consulted by streak/progression math."""
+    tax = {t.activity_type: t for t in session.scalars(select(ActivityTaxonomy)).all()}
+    custom = {c.id: c for c in session.scalars(
+        select(CustomExercise).where(CustomExercise.user_id == user_id)).all()}
 
-    pb_rows = session.scalars(
-        select(PersonalBest)
-        .where(PersonalBest.user_id == user_id)
-        .order_by(PersonalBest.activity_type, PersonalBest.value.desc())
-    ).all()
-
-    out: dict[str, list[dict]] = {}
-    for r in pb_rows:
-        out.setdefault(r.activity_type, []).append({
-            "value": float(r.value),
-            "sets": 1,
-            "unit": r.unit,
-            "total_volume": float(r.value),
-            "achieved_at": r.achieved_at.isoformat(),
-            "display_name": tax_names.get(r.activity_type, r.activity_type),
-        })
-
-    # For any activities with plausible logs not already in out from PersonalBest:
     logs = session.scalars(
-        select(ActivityLog)
-        .where(
+        select(ActivityLog).where(
             ActivityLog.user_id == user_id,
-            ActivityLog.implausible.is_(False),
-        )
-        .order_by(ActivityLog.amount_per_set.desc(), ActivityLog.logged_at.desc())
+            or_(ActivityLog.implausible.is_(False), ActivityLog.extraordinary.is_(True)))
     ).all()
 
+    best: dict[str, tuple[float, ActivityLog]] = {}
     for l in logs:
         key = l.activity_type or l.custom_exercise_id
-        if not key or key in out:
+        if not key:
             continue
-        display_name = tax_names.get(l.activity_type) or custom_names.get(l.custom_exercise_id) or key
+        if l.activity_type in tax:
+            ptype = tax[l.activity_type].prescription_type
+        elif l.custom_exercise_id in custom:
+            ptype = custom[l.custom_exercise_id].measurement_type
+        else:
+            ptype = None
+        value = _personal_best_value(ptype, l)
+        cur = best.get(key)
+        # On a tie the earlier entry keeps the record (it was set first).
+        if cur is None or value > cur[0] or (value == cur[0] and l.logged_at < cur[1].logged_at):
+            best[key] = (value, l)
+
+    out: dict[str, list[dict]] = {}
+    for key, (value, l) in best.items():
+        name = (tax[l.activity_type].display_name if l.activity_type in tax
+                else custom[l.custom_exercise_id].name if l.custom_exercise_id in custom else key)
         out[key] = [{
-            "value": float(l.amount_per_set),
-            "sets": l.sets_done,
+            "value": round(value, 2),
+            "sets": 1,
             "unit": l.unit,
             "total_volume": float(l.total_volume),
             "achieved_at": l.logged_at.isoformat(),
-            "display_name": display_name,
+            "display_name": name,
         }]
-
     return out
-
-
 
 
 def log_activity(session: Session, user_id: str, *, activity_type: str | None = None,
@@ -1123,9 +1333,17 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
                  unit: str | None = None, source: str = "manual",
                  client_entry_id: str | None = None,
                  workout_session_id: str | None = None,
-                 set_amounts: list[float] | None = None) -> dict:
+                 set_amounts: list[float] | None = None,
+                 replace_today: bool = False) -> dict:
     if bool(activity_type) == bool(custom_exercise_id):
         raise ValidationError("Provide exactly one of activity_type or custom_exercise_id.")
+    # Workout Player corrections: the player holds ONE entry per exercise per
+    # day, so saving again replaces it instead of adding on top (20 reps then a
+    # corrected 15 must read 15, never 35). Deliberately opt-in and limited to
+    # player saves — voice, GPS and home-card logs keep appending as before.
+    if replace_today and not (activity_type and workout_session_id and source == "manual"):
+        raise ValidationError(
+            "replace_today is only for a Workout Player save of a catalogue exercise.")
     # Validated up front, before anything else: a bad workout_session_id
     # must fail the whole entry cleanly rather than log the exercise and
     # silently drop the session tag.
@@ -1199,7 +1417,7 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
     if custom_exercise_id:
         # 4.4 — same entry point, same validation shape as a taxonomy log;
         # the only different source is where the ceiling/unit come from.
-        custom = session.get(CustomExercise, custom_exercise_id)
+        custom = session.get(CustomExercise, custom_exercise_id) if _is_uuid(custom_exercise_id) else None
         if custom is None or custom.user_id != user_id or custom.deleted_at is not None:
             raise NotFound(f"Unknown custom exercise: {custom_exercise_id}")
         # unit->type is 1:1 (count/km/min never collide) — a custom exercise
@@ -1283,6 +1501,36 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
             return {"id": existing.id, "duplicate": True,
                     "implausible": existing.implausible,
                     "total_volume": float(existing.total_volume)}
+
+    if replace_today:
+        # After the duplicate-replay check above, so a retried request carrying
+        # the same client_entry_id never deletes anything. Only today's
+        # player-saved ("manual" + tagged to a workout session) entries for this
+        # exercise are replaced — never voice/GPS/home-card entries.
+        replaced = session.scalars(
+            select(ActivityLog).where(
+                ActivityLog.user_id == user_id,
+                ActivityLog.activity_type == activity_type,
+                ActivityLog.local_date == today_ist(),
+                ActivityLog.source == "manual",
+                ActivityLog.workout_session_id.is_not(None))
+        ).all()
+        for old in replaced:
+            # The old entry's session count was "+1 for this exercise"; take it
+            # back so a session never claims more completed exercises than it
+            # has entries (the new one re-adds it to the current session below).
+            old_session = session.get(WorkoutSession, old.workout_session_id)
+            if old_session is not None and old_session.completed_activity_count > 0:
+                old_session.completed_activity_count -= 1
+            # A personal best earned by the entry being corrected must go with
+            # it (PersonalBest.source_log_id would otherwise just be nulled and
+            # the possibly-mistaken record would live on). Any exercise type.
+            for pb in session.scalars(
+                    select(PersonalBest).where(PersonalBest.source_log_id == old.id)).all():
+                session.delete(pb)
+            session.delete(old)
+        if replaced:
+            session.flush()
 
     log = ActivityLog(
         user_id=user_id, activity_type=row_activity_type,
@@ -1487,9 +1735,20 @@ def get_water_today(session: Session, user_id: str) -> dict:
 
 # --- Workout sessions (guided player) ---------------------------------------
 
+def _is_uuid(value) -> bool:
+    """A body-supplied id (unlike a path id, which the `uid` URL converter
+    already guards) reaches session.get() against a Postgres UUID column; a
+    malformed one raised a database DataError (500) instead of "not found"."""
+    try:
+        uuid.UUID(str(value))
+        return True
+    except ValueError:
+        return False
+
+
 def _get_active_workout_session(session: Session, user_id: str,
                                 workout_session_id: str) -> WorkoutSession:
-    row = session.get(WorkoutSession, workout_session_id)
+    row = session.get(WorkoutSession, workout_session_id) if _is_uuid(workout_session_id) else None
     if row is None or row.user_id != user_id:
         raise NotFound(f"Unknown workout session: {workout_session_id}")
     if row.status != "active":
@@ -1986,6 +2245,27 @@ def suggestions_today(session: Session, user_id: str, limit: int = 3) -> dict:
             UserProgram.user_id == user_id, UserProgram.status == "active")
     ).all())
 
+    # What the Workout Player already saved today for each exercise (the one
+    # entry per exercise per day it holds — see log_activity's replace_today).
+    # Lets the player open an already-done exercise locked, showing exactly
+    # what was entered. Home-card / voice / GPS entries are deliberately not
+    # included, so they never lock the player.
+    player_logs: dict[str, dict] = {}
+    for r in session.scalars(
+        select(ActivityLog).where(
+            ActivityLog.user_id == user_id,
+            ActivityLog.local_date == today_ist(),
+            ActivityLog.activity_type.is_not(None),
+            ActivityLog.source == "manual",
+            ActivityLog.workout_session_id.is_not(None))
+        .order_by(ActivityLog.logged_at.desc())
+    ).all():
+        player_logs.setdefault(r.activity_type, {
+            "sets": r.sets_done, "amount": float(r.amount_per_set),
+            "set_amounts": [float(v) for v in r.set_amounts] if r.set_amounts else None,
+            "logged_at": r.logged_at,
+        })
+
     videos = {v.activity_type: v for v in session.scalars(select(VideoCatalog)).all()}
 
     def tier_of(activity_type: str) -> str:
@@ -2004,7 +2284,12 @@ def suggestions_today(session: Session, user_id: str, limit: int = 3) -> dict:
         added_at = added_at_by_type.get(p["activity_type"])
         completed = (logged_at is not None and added_at is not None
                      and logged_at >= added_at)
-        items.append({**p, "completed": completed,
+        # Same freshness rule as `completed`: an entry saved before this
+        # program entry's latest (re-)add doesn't belong to today's instance.
+        pl = player_logs.get(p["activity_type"])
+        player_log = ({k: v for k, v in pl.items() if k != "logged_at"}
+                      if pl and added_at is not None and pl["logged_at"] >= added_at else None)
+        items.append({**p, "completed": completed, "player_log": player_log,
                       # `or None`: every uncurated row is seeded with
                       # watch_url="" (the column is NOT NULL, see
                       # catalog/loader.py's seed_videos), and no video has

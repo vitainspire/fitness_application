@@ -11,6 +11,7 @@ from flask_cors import CORS
 from app.platform import redis_clients as rc
 from app.platform.config import load_config
 from app.platform.db import init_engine
+from app.platform.converters import UuidStrConverter
 from app.platform.errors import register_error_handlers
 
 
@@ -18,6 +19,8 @@ def create_app() -> Flask:
     cfg = load_config()
 
     app = Flask(__name__)
+    # Must be registered before any blueprint adds its rules (see converters.py).
+    app.url_map.converters["uid"] = UuidStrConverter
     app.config["APP_CONFIG"] = cfg
     app.config["SECRET_KEY"] = cfg.secret_key
     # Found live (pre-launch production readiness check): nothing capped
@@ -63,6 +66,13 @@ def create_app() -> Flask:
     @app.after_request
     def _echo_request_id(response):
         response.headers["X-Request-Id"] = getattr(g, "request_id", "")
+        # Browsers must not guess a different content type than the one we send.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        # Private (logged-in) responses must not be stored by a browser or proxy cache.
+        # Public reference lists carry no token and stay cacheable; a route that already
+        # set its own Cache-Control (the voice audio) keeps it.
+        if request.headers.get("Authorization"):
+            response.headers.setdefault("Cache-Control", "no-store")
         return response
 
     # Capacity isolation (see Config.service_role's own comment for the full

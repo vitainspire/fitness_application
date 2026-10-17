@@ -116,6 +116,11 @@ class PendingManagedEntry(Base):
     # (open_invite), so a decision already made in front of the manager isn't
     # silently re-blocked (and the entry dropped with no one told) later.
     override_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Optional per-set breakdown (e.g. [12, 10, 8]) staged instead of a uniform
+    # sets x amount; null means the uniform target_sets/target_amount above.
+    # When set, those two hold its length/average (same invariant as
+    # UserProgram.set_targets).
+    set_amounts: Mapped[list[float] | None] = mapped_column(ARRAY(Numeric(10, 2)))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
 

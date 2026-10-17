@@ -41,6 +41,19 @@ def _float_field(d: dict, key: str, default: float = 0.0) -> float:
         raise ValidationError(f"{key!r} is out of range.")
 
 
+def _optional_number_list(d: dict, key: str) -> list[float] | None:
+    """Absent/null means \"not provided\" (kept distinct from an empty list,
+    which the service rejects). Same shape rules as profile/routes.py's helper
+    of the same purpose — duplicated, matching this module's own convention."""
+    value = d.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        raise ValidationError(f"{key!r} must be a list of numbers.")
+    return [float(v) for v in value]
+
+
 def _int_field(d: dict, key: str, default: int) -> int:
     value = d.get(key)
     if value is None:
@@ -105,7 +118,7 @@ def open_invite():
         })
 
 
-@bp.delete("/<relationship_id>")
+@bp.delete("/<uid:relationship_id>")
 @require_auth
 def revoke(relationship_id: str):
     hard_delete = request.args.get("delete", "").lower() in ("true", "1")
@@ -114,7 +127,7 @@ def revoke(relationship_id: str):
     return jsonify({"status": "revoked"})
 
 
-@bp.get("/<relationship_id>/activity")
+@bp.get("/<uid:relationship_id>/activity")
 @require_auth
 def activity(relationship_id: str):
     """"What are they actually doing" — plan doc §6."""
@@ -122,7 +135,7 @@ def activity(relationship_id: str):
         return jsonify(service.get_managed_activity(s, g.user_id, relationship_id))
 
 
-@bp.post("/<relationship_id>/pending-entries")
+@bp.post("/<uid:relationship_id>/pending-entries")
 @require_auth
 def add_pending_entry(relationship_id: str):
     """Build the plan BEFORE the invite link is shared — see
@@ -138,18 +151,19 @@ def add_pending_entry(relationship_id: str):
             target_amount=_float_field(d, "target_amount"),
             auto_progress=bool(d.get("auto_progress", True)),
             override_confirmed=bool(d.get("override_confirmed")),
+            set_amounts=_optional_number_list(d, "set_amounts"),
         )
         return jsonify(result), 201 if result.get("added") else 200
 
 
-@bp.get("/<relationship_id>/pending-entries")
+@bp.get("/<uid:relationship_id>/pending-entries")
 @require_auth
 def list_pending_entries(relationship_id: str):
     with session_scope() as s:
         return jsonify({"entries": service.list_pending_entries(s, g.user_id, relationship_id)})
 
 
-@bp.delete("/<relationship_id>/pending-entries/<activity_type>")
+@bp.delete("/<uid:relationship_id>/pending-entries/<activity_type>")
 @require_auth
 def remove_pending_entry(relationship_id: str, activity_type: str):
     with session_scope() as s:
@@ -157,7 +171,7 @@ def remove_pending_entry(relationship_id: str, activity_type: str):
     return jsonify({"status": "removed"})
 
 
-@bp.put("/<relationship_id>/pending-profile")
+@bp.put("/<uid:relationship_id>/pending-profile")
 @require_auth
 def set_pending_profile(relationship_id: str):
     """The manager answers the onboarding questions on the managed person's
@@ -175,7 +189,7 @@ def set_pending_profile(relationship_id: str):
         ))
 
 
-@bp.get("/<relationship_id>/suggested-exercises")
+@bp.get("/<uid:relationship_id>/suggested-exercises")
 @require_auth
 def suggested_exercises(relationship_id: str):
     """One-click-add suggestions for the pending-build screen — see
@@ -184,7 +198,7 @@ def suggested_exercises(relationship_id: str):
         return jsonify({"suggestions": service.suggested_exercises(s, g.user_id, relationship_id)})
 
 
-@bp.get("/<relationship_id>/blocked-activities")
+@bp.get("/<uid:relationship_id>/blocked-activities")
 @require_auth
 def blocked_activities(relationship_id: str):
     """What the "Add to their plan" picker should grey out, for whatever
@@ -194,7 +208,7 @@ def blocked_activities(relationship_id: str):
         return jsonify({"blocked": service.blocked_activities(s, g.user_id, relationship_id)})
 
 
-@bp.post("/<relationship_id>/pending-custom-exercises")
+@bp.post("/<uid:relationship_id>/pending-custom-exercises")
 @require_auth
 def add_pending_custom_exercise(relationship_id: str):
     d = _body()
@@ -213,7 +227,7 @@ def add_pending_custom_exercise(relationship_id: str):
         return jsonify(result), 201
 
 
-@bp.get("/<relationship_id>/pending-custom-exercises")
+@bp.get("/<uid:relationship_id>/pending-custom-exercises")
 @require_auth
 def list_pending_custom_exercises(relationship_id: str):
     with session_scope() as s:
@@ -222,7 +236,7 @@ def list_pending_custom_exercises(relationship_id: str):
         })
 
 
-@bp.delete("/<relationship_id>/pending-custom-exercises/<custom_exercise_id>")
+@bp.delete("/<uid:relationship_id>/pending-custom-exercises/<uid:custom_exercise_id>")
 @require_auth
 def remove_pending_custom_exercise(relationship_id: str, custom_exercise_id: str):
     with session_scope() as s:

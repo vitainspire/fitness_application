@@ -43,6 +43,10 @@ def create_invite(session: Session, manager_user_id: str, relation_type: str, na
         raise ValidationError("Enter their name.")
     if len(name) > 100:
         raise ValidationError("Name must be 100 characters or fewer.")
+    # Same server-side backstop custom exercise names already have: a name reaches
+    # every client verbatim, so don't store markup in it. (Existing rows are untouched.)
+    from app.profile.service import _reject_unsafe_name  # local: import cycle
+    _reject_unsafe_name(name)
     if is_managed_account(session, manager_user_id):
         raise Forbidden(
             "This account is managed by someone else, so it can't create "
@@ -205,7 +209,8 @@ def suggested_exercises(session: Session, manager_user_id: str, relationship_id:
 
 def add_pending_entry(session: Session, manager_user_id: str, relationship_id: str, *,
                       activity_type: str, target_sets: int, target_amount: float,
-                      auto_progress: bool, override_confirmed: bool = False) -> dict:
+                      auto_progress: bool, override_confirmed: bool = False,
+                      set_amounts: list[float] | None = None) -> dict:
     """The reordering this feature actually needs: a manager builds out the
     plan BEFORE the link is ever shared, so the moment it's claimed, the
     person sees it already set up — not an empty account waiting on the
@@ -245,18 +250,36 @@ def add_pending_entry(session: Session, manager_user_id: str, relationship_id: s
     t = session.get(ActivityTaxonomy, activity_type)
     if t is None:
         raise NotFound(f"Unknown activity: {activity_type}")
-    if round(target_amount, 2) <= 0:
-        raise ValidationError("Amount must be greater than zero.")
-    if target_sets < 1:
-        raise ValidationError("Sets must be at least 1.")
-    if t.prescription_type in ("distance", "duration") and target_sets != 1:
-        raise ValidationError(f"{t.display_name} is a single effort, not sets.")
-    if t.prescription_type == "reps":
-        from app.progression.service import _round_reps  # local: see
-        # app/profile/service.py's set_managed_target for why (import cycle).
-        target_amount = _round_reps(target_amount)
+    if set_amounts is not None:
+        # A per-set breakdown replaces target_sets/target_amount entirely
+        # (length / average), the same invariant UserProgram.set_targets keeps.
+        from app.progression.service import _round_reps  # local: import cycle
+        from app.profile.service import normalize_set_amounts  # local: import cycle
+        set_amounts = normalize_set_amounts(t, set_amounts)
+        target_sets = len(set_amounts)
+        avg = sum(set_amounts) / len(set_amounts)
+        target_amount = _round_reps(avg) if t.prescription_type == "reps" else round(avg, 2)
+    else:
+        if round(target_amount, 2) <= 0:
+            raise ValidationError("Amount must be greater than zero.")
+        if target_sets < 1:
+            raise ValidationError("Sets must be at least 1.")
+        if t.prescription_type in ("distance", "duration") and target_sets != 1:
+            raise ValidationError(f"{t.display_name} is a single effort, not sets.")
+        if t.prescription_type == "reps":
+            from app.progression.service import _round_reps  # local: see
+            # app/profile/service.py's set_managed_target for why (import cycle).
+            target_amount = _round_reps(target_amount)
 
-    if row.pending_condition_codes and not override_confirmed:
+    # Editing a staged item re-stages it. If the manager already confirmed the
+    # safety warning for this exact item, that decision stands (and is kept
+    # below) instead of asking again.
+    prior = session.scalar(
+        select(PendingManagedEntry).where(
+            PendingManagedEntry.relationship_id == relationship_id,
+            PendingManagedEntry.activity_type == activity_type))
+    already_confirmed = prior is not None and prior.override_confirmed
+    if row.pending_condition_codes and not override_confirmed and not already_confirmed:
         cells = session.execute(
             select(SafetyGridCell.verdict, Condition.display_name)
             .join(Condition, Condition.condition_code == SafetyGridCell.condition_code)
@@ -284,12 +307,14 @@ def add_pending_entry(session: Session, manager_user_id: str, relationship_id: s
         existing.target_sets = target_sets
         existing.target_amount = target_amount
         existing.auto_progress = auto_progress
-        existing.override_confirmed = override_confirmed
+        existing.override_confirmed = override_confirmed or existing.override_confirmed
+        existing.set_amounts = set_amounts
     else:
         existing = PendingManagedEntry(
             relationship_id=relationship_id, activity_type=activity_type,
             target_sets=target_sets, target_amount=target_amount,
             auto_progress=auto_progress, override_confirmed=override_confirmed,
+            set_amounts=set_amounts,
         )
         session.add(existing)
     session.flush()
@@ -297,6 +322,7 @@ def add_pending_entry(session: Session, manager_user_id: str, relationship_id: s
         "added": True, "needs_confirmation": False,
         "activity_type": existing.activity_type, "target_sets": existing.target_sets,
         "target_amount": float(existing.target_amount), "auto_progress": existing.auto_progress,
+        "set_amounts": [float(v) for v in existing.set_amounts] if existing.set_amounts else None,
     }
 
 
@@ -310,7 +336,8 @@ def list_pending_entries(session: Session, manager_user_id: str,
     ).all()
     return [
         {"activity_type": e.activity_type, "target_sets": e.target_sets,
-         "target_amount": float(e.target_amount), "auto_progress": e.auto_progress}
+         "target_amount": float(e.target_amount), "auto_progress": e.auto_progress,
+         "set_amounts": [float(v) for v in e.set_amounts] if e.set_amounts else None}
         for e in rows
     ]
 
@@ -409,6 +436,7 @@ def _materialize_pending_entries(session: Session, row: ManagedRelationship) -> 
         profile_service.set_managed_target(
             session, row.manager_user_id, row.managed_user_id, entry.activity_type,
             target_sets=entry.target_sets, target_amount=float(entry.target_amount),
+            set_amounts=[float(v) for v in entry.set_amounts] if entry.set_amounts else None,
         )
         session.delete(entry)
 
@@ -687,7 +715,10 @@ def get_managed_activity(session: Session, manager_user_id: str, relationship_id
         # intentionally isn't surfaced here.
         "managed_entries": [
             {"activity_type": e.activity_type, "target_sets": e.target_sets,
-             "target_amount": float(e.target_amount), "auto_progress": e.auto_progress}
+             "target_amount": float(e.target_amount), "auto_progress": e.auto_progress,
+             # Only present when there IS a per-set breakdown, so an ordinary
+             # uniform entry keeps exactly the shape it always had.
+             **({"set_targets": [float(v) for v in e.set_targets]} if e.set_targets else {})}
             for e in managed_entries
         ],
     }

@@ -158,6 +158,13 @@ def activities():
 @require_auth
 def onboarding():
     d = _body()
+    # Found live (E2E audit): an omitted condition_codes silently became [] ("no
+    # conditions"), which for a medical-safety screen is the one field that must
+    # be an explicit answer (API_REFERENCE.md: "never omit the field"). The
+    # frontend always sends it; an explicit [] still means "none". Checked here,
+    # not in the shared _list_field, which other endpoints rely on defaulting.
+    if "condition_codes" not in d:
+        raise ValidationError("'condition_codes' is required (use [] for none).")
     with session_scope() as s:
         return jsonify(service.complete_onboarding(
             s, g.user_id,
@@ -166,6 +173,7 @@ def onboarding():
             experience_band=_str_field(d, "experience_band"),
             condition_codes=_list_field(d, "condition_codes"),
             unit_preference=_str_field(d, "unit_preference", "km"),
+            confirm_rescale=d.get("confirm_rescale") is True,
         ))
 
 
@@ -195,7 +203,8 @@ def update_profile():
     if "age" in d:
         fields["age"] = d["age"]
     with session_scope() as s:
-        return jsonify(service.update_profile(s, g.user_id, fields=fields))
+        return jsonify(service.update_profile(
+            s, g.user_id, fields=fields, confirm_rescale=d.get("confirm_rescale") is True))
 
 
 @bp.get("/program")
@@ -216,6 +225,11 @@ def program_catalogue():
 @require_auth
 def add_program_entry():
     d = _body()
+    # Found live (E2E audit): a body with no activity_type fell through as ""
+    # and surfaced as 404 "Unknown activity: " — a missing required field is
+    # a validation error (422), not a missing resource.
+    if not _str_field(d, "activity_type"):
+        raise ValidationError("'activity_type' is required.")
     # managed_user_id present = a manager (teacher/doctor/parent) acting on
     # someone else's plan — see MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md.
     # Authorization (an active relationship must exist) is checked inside
@@ -259,6 +273,7 @@ def set_managed_target(activity_type: str):
                 s, g.user_id, managed_user_id, activity_type,
                 target_sets=_int_field(d, "target_sets", 1),
                 target_amount=_float_field(d, "target_amount"),
+                set_amounts=_optional_number_list_field(d, "set_amounts"),
             )
         else:
             result = service.set_own_target(
@@ -303,6 +318,9 @@ def log():
                 raise ValidationError("Each activity entry must be a JSON object.")
             activity_type = _optional_str_field(e, "activity_type")
             set_amounts = _optional_number_list_field(e, "set_amounts")
+            replace_today = e.get("replace_today", False)
+            if not isinstance(replace_today, bool):
+                raise ValidationError("'replace_today' must be true or false.")
             out.append(service.log_activity(
                 s, g.user_id,
                 activity_type=activity_type,
@@ -314,6 +332,7 @@ def log():
                 client_entry_id=_optional_str_field(e, "client_entry_id"),
                 workout_session_id=_optional_str_field(e, "workout_session_id"),
                 set_amounts=set_amounts,
+                replace_today=replace_today,
             ))
             # First real per-set log for this activity switches it from the
             # single-blended-target system to per-set independent tracking
@@ -372,13 +391,18 @@ def start_workout_session():
     exactly what the player is about to show (from a prior /v1/suggestions
     call) — see service.start_workout_session for why that matters."""
     d = _body()
+    activity_types = _list_field(d, "activity_types")
+    # Found live (E2E audit): an empty list created a pointless 0-exercise
+    # session. The app never sends one (the player returns early when there is
+    # nothing to play), so this only rejects junk.
+    if not activity_types:
+        raise ValidationError("'activity_types' must contain at least one activity.")
     with session_scope() as s:
-        result = service.start_workout_session(
-            s, g.user_id, _list_field(d, "activity_types"))
+        result = service.start_workout_session(s, g.user_id, activity_types)
         return jsonify(result), 201
 
 
-@bp.post("/workout-sessions/<workout_session_id>/finish")
+@bp.post("/workout-sessions/<uid:workout_session_id>/finish")
 @require_auth
 def finish_workout_session(workout_session_id: str):
     with session_scope() as s:
@@ -413,7 +437,7 @@ def create_custom_exercise():
         return jsonify(result), 201
 
 
-@bp.put("/custom-exercises/<exercise_id>")
+@bp.put("/custom-exercises/<uid:exercise_id>")
 @require_auth
 def rename_custom_exercise(exercise_id: str):
     d = _body()
@@ -422,7 +446,7 @@ def rename_custom_exercise(exercise_id: str):
             s, g.user_id, exercise_id, _str_field(d, "name")))
 
 
-@bp.delete("/custom-exercises/<exercise_id>")
+@bp.delete("/custom-exercises/<uid:exercise_id>")
 @require_auth
 def delete_custom_exercise(exercise_id: str):
     with session_scope() as s:
