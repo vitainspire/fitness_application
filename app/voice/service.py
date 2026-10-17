@@ -1,4 +1,5 @@
 import json
+import re
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -6,6 +7,43 @@ from app.catalog.models import ActivityTaxonomy
 from app.platform.errors import QuotaExhausted, RateLimited
 from app.rag.service import _consume_quota, _refund_quota, VOICE_QUOTA_TYPE, VOICE_DAILY_LIMIT
 from app.rag.vectorstore import chat_complete, VOICE_CHAT_MODEL, UpstreamUnavailable, ResponseTruncated
+
+# A written distance in the transcript: "3 km", "2.5 kilometers", "5k", "3 miles", "800 meters".
+# Bare "m" is deliberately not matched (it could mean minutes), nor "mi".
+_DISTANCE_NUMBER = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(km|kms|kilomet(?:er|re)s?|miles?|met(?:er|re)s?)\b|(\d+(?:\.\d+)?)\s*k\b",
+    re.IGNORECASE)
+# Any distance word at all, with or without a readable number ("two kilometers", "half a mile").
+_DISTANCE_WORD = re.compile(
+    r"\b(?:km|kms|kilomet(?:er|re)s?|miles?|met(?:er|re)s?)\b|\b\d+(?:\.\d+)?\s*k\b", re.IGNORECASE)
+
+
+def _spoken_distances_km(transcript: str) -> list[float]:
+    """Every distance written as a number in the transcript, in kilometers, in the order
+    spoken. Used only as a safety net: the model is asked to report the distance itself,
+    but sometimes leaves it empty when a time is also mentioned."""
+    out = []
+    for m in _DISTANCE_NUMBER.finditer(transcript or ""):
+        if m.group(1) is not None:
+            value, unit = float(m.group(1)), m.group(2).lower()
+            km = value * 1.609344 if unit.startswith("mile") else value / 1000 if unit.startswith("met") else value
+        else:
+            km = float(m.group(3))
+        km = round(km, 2)
+        if km > 0:
+            out.append(km)
+    return out
+
+
+def _positive_numbers(value) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    return [s for s in value if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0]
+
+
+def _positive_minutes(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
 
 def extract_activities(session: Session, user_id: str, transcript: str, *, openrouter_api_key: str) -> dict:
     if not _consume_quota(session, user_id, quota_type=VOICE_QUOTA_TYPE, limit=VOICE_DAILY_LIMIT):
@@ -70,6 +108,7 @@ Rules:
 - CRITICAL: If the transcript specifies multiple sets, you MUST output an array containing the reps repeated for each set (e.g., "X sets of Y reps" becomes [Y, Y, ... repeated X times]). Do NOT just extract the set count.
 - Even a single set must be in a list.
 - Exception — a DISTANCE exercise (its unit above is km) where the user gave only a time and no distance (e.g. "walked for 30 minutes"): output set_amounts as an empty list [] and put the minutes in duration_minutes. Do NOT guess a distance; the app converts the time itself. If the user gave a distance, use it as normal.
+- If the user said BOTH a distance and a time (for example "walked 3 km in 40 minutes"), ALWAYS put the spoken distance in set_amounts (here [3]) and the time in duration_minutes. Never leave set_amounts empty when a distance was spoken.
 - activity_type must be an exact taxonomy code from the list above, or null.
 - Never output garbled/nonsensical text from the transcript in activity_name. Always clean it up.
 - Never invent reps or sets that were not mentioned.
@@ -123,6 +162,24 @@ Respond ONLY with the JSON object, no explanation, no markdown.
             entries_raw = []
         reply_text = data.get("reply_text", "Got it!")
 
+        # Safety net for a time-AND-distance phrase ("walked 3 km in 40 minutes") where the
+        # model left the amount empty: work out which spoken distances no entry already
+        # carries, and how many distance entries are waiting for one.
+        spoken = _spoken_distances_km(transcript)
+        mentions_distance = bool(_DISTANCE_WORD.search(transcript or ""))
+        remaining = list(spoken)
+        for it in entries_raw:
+            if isinstance(it, dict):
+                for used in _positive_numbers(it.get("set_amounts")):
+                    for idx, d in enumerate(remaining):
+                        if abs(d - used) < 0.011:
+                            del remaining[idx]
+                            break
+        needy_count = sum(
+            1 for it in entries_raw
+            if isinstance(it, dict) and pace_by_code.get(it.get("activity_type"))
+            and not _positive_numbers(it.get("set_amounts")) and _positive_minutes(it.get("duration_minutes")))
+
         entries = []
         for item in entries_raw:
             if not isinstance(item, dict):
@@ -139,15 +196,24 @@ Respond ONLY with the JSON object, no explanation, no markdown.
                 isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 for s in sets)
             minutes = item.get("duration_minutes")
             pace = pace_by_code.get(item.get("activity_type"))
-            if (not has_amount and pace and isinstance(minutes, (int, float))
-                    and not isinstance(minutes, bool) and minutes > 0):
-                # Distance = time / average pace (done here, not by the model).
-                km = round(minutes / pace, 2)
-                if km > 0:
-                    item["set_amounts"] = [km]
+            if not has_amount and pace and _positive_minutes(minutes):
+                if needy_count == 1 and len(remaining) == 1:
+                    # The user SAID a distance (and a time): keep the distance, never the time.
+                    item["set_amounts"] = [remaining[0]]
                     item["unit"] = "km"
-                    item["estimated_from_minutes"] = minutes  # lets the screen mark it as an estimate
                     sets = item["set_amounts"]
+                elif remaining or (mentions_distance and not spoken):
+                    # A distance was said but can't be tied to this entry safely (several
+                    # entries, or a number written in words): don't invent one from the time.
+                    pass
+                else:
+                    # Time only: distance = time / average pace (done here, not by the model).
+                    km = round(minutes / pace, 2)
+                    if km > 0:
+                        item["set_amounts"] = [km]
+                        item["unit"] = "km"
+                        item["estimated_from_minutes"] = minutes  # lets the screen mark it as an estimate
+                        sets = item["set_amounts"]
             if not isinstance(sets, list) or len(sets) == 0:
                 continue
             
