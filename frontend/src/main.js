@@ -137,7 +137,70 @@ function closeAppConfirm(result) {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && appConfirmResolve) closeAppConfirm(false);
+  if (e.key === "Escape" && appPromptResolve) closeAppPrompt(false);
 });
+
+// In-app replacement for prompt() where the text must be hidden (a password): resolves the
+// typed text on OK / Enter, or null on Cancel, Escape or a tap outside. The field is emptied
+// every time it opens and closes, so a password never lingers in the page.
+let appPromptResolve = null;
+
+function appPrompt({ message, title = "", confirmText = "OK", cancelText = "Cancel", danger = false,
+                     inputType = "text", placeholder = "", autocomplete = "off", initialValue = "",
+                     inputMode = "", step = "", readOnly = false, selectOnOpen = false }) {
+  return new Promise((resolve) => {
+    if (appPromptResolve) appPromptResolve(null);
+    appPromptResolve = resolve;
+    const titleEl = $("app-prompt-title");
+    titleEl.textContent = title;
+    titleEl.classList.toggle("hidden", !title);
+    $("app-prompt-msg").textContent = message;
+    const input = $("app-prompt-input");
+    // Every option is set (or cleared) on each open, so nothing from the previous use leaks in.
+    input.type = inputType;
+    input.placeholder = placeholder;
+    input.autocomplete = autocomplete;
+    input.readOnly = readOnly;
+    if (inputMode) input.setAttribute("inputmode", inputMode); else input.removeAttribute("inputmode");
+    if (step) input.setAttribute("step", step); else input.removeAttribute("step");
+    input.value = initialValue === null || initialValue === undefined ? "" : String(initialValue);
+    const ok = $("app-prompt-ok");
+    ok.textContent = confirmText;
+    ok.classList.toggle("bg-error", danger);
+    ok.classList.toggle("text-white", danger);
+    ok.classList.toggle("bg-primary", !danger);
+    ok.classList.toggle("text-on-primary", !danger);
+    $("app-prompt-cancel").textContent = cancelText;
+    const m = $("app-prompt-modal");
+    m.classList.remove("hidden");
+    m.classList.add("flex");
+    input.focus();
+    if (selectOnOpen) input.select();
+  });
+}
+
+// Set by closeAppPrompt when a read-only box (the invite link) was confirmed: did the
+// copy to the clipboard actually work? Lets the caller tell the user the truth.
+let appPromptCopyOk = false;
+
+function closeAppPrompt(submit) {
+  const input = $("app-prompt-input");
+  const value = submit ? input.value : null;
+  appPromptCopyOk = false;
+  if (submit && input.readOnly) {
+    // A read-only box (the invite link): confirming copies it. Done here, while the field
+    // is still visible and the click is still the user's gesture, which copying needs.
+    try { input.select(); appPromptCopyOk = document.execCommand("copy"); } catch (_) { appPromptCopyOk = false; }
+  }
+  input.value = "";
+  input.readOnly = false;
+  const m = $("app-prompt-modal");
+  m.classList.add("hidden");
+  m.classList.remove("flex");
+  const resolve = appPromptResolve;
+  appPromptResolve = null;
+  if (resolve) resolve(value);
+}
 
 function toast(msg, bad) {
   const t = $("toast");
@@ -847,7 +910,10 @@ async function renameCustomPrompt(id) {
   // XSS risk even HTML-escaped, since the browser decodes entities before
   // treating the attribute as JS.
   const currentName = (customExercises.find(c => c.id === id) || {}).name || "";
-  const name = window.prompt("Rename to:", currentName);
+  const name = await appPrompt({
+    title: "Rename exercise", message: "Give this exercise a new name.", confirmText: "Save",
+    initialValue: currentName, placeholder: "e.g. Swimming", selectOnOpen: true,
+  });
   if (!name || !name.trim() || name.trim() === currentName) return;
   try {
     await api("PUT", `/v1/custom-exercises/${id}`, {name: name.trim()});
@@ -1676,11 +1742,14 @@ function renderVoiceConfirmation(replyText) {
   }).join("");
 }
 
-function editVoiceValue(entryIdx, setIdx) {
+async function editVoiceValue(entryIdx, setIdx) {
   const e = voiceEntries[entryIdx];
   const current = e.set_amounts[setIdx];
   const name = e.activity_name || e.activity_type;
-  const val = window.prompt(`Edit value for ${name} - Set ${setIdx + 1}:`, current);
+  const val = await appPrompt({
+    title: "Edit value", message: `${name} — Set ${setIdx + 1}`, confirmText: "Save",
+    inputType: "number", inputMode: "decimal", step: "any", initialValue: current, selectOnOpen: true,
+  });
   if (!val) return;
   const num = parseFloat(val);
   if (!isNaN(num) && num > 0) {
@@ -3915,7 +3984,11 @@ async function delAccount() {
   // DELETE /v1/account now requires re-confirming the password (found live,
   // third-pass code audit — the most destructive action in the app used to
   // need only a valid session, no re-authentication).
-  const password = window.prompt("Confirm your password to delete your account:");
+  // Masked in-app box (the browser prompt() showed the typed password in clear text).
+  const password = await appPrompt({
+    message: "Confirm your password to delete your account.", confirmText: "Delete account", danger: true,
+    inputType: "password", placeholder: "Your password", autocomplete: "current-password",
+  });
   if (!password) return;
   // Only sign out if the delete actually succeeded. Swallowing the error and
   // clearing storage regardless (what this used to do) told the user their
@@ -3987,7 +4060,10 @@ async function loadRelationships() {
     const clickable = openFn ? `cursor-pointer" onclick="${openFn}` : "";
     const rawName = r.name || RELATION_LABELS[r.relation_type] || r.relation_type;
     const displayName = escapeHtml(rawName);
-    const safeName = rawName.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    // The Revoke / Remove buttons below pass only the id (a UUID) and status. Their
+    // popups look the name up from RELATIONSHIPS_CACHE and show it with textContent —
+    // a name is never placed inside an inline handler, where an HTML entity such as
+    // &#39; could break out of the quoted string and run code.
 
     return `
     <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md flex items-center gap-sm">
@@ -4000,11 +4076,11 @@ async function loadRelationships() {
       </div>
       ${r.status === 'pending' ? `<button type="button" onclick="event.stopPropagation(); copyInviteLink('${r.invite_token}')" class="shrink-0 bg-primary text-on-primary px-md py-xs rounded-full font-label-bold text-label-bold hover:opacity-95 active:scale-95 transition-all">Copy link</button>` : ''}
       ${!isRevoked ? `
-        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptRevokeRelationship('${r.id}', '${safeName}', '${r.status}')" title="${r.status === 'pending' ? 'Cancel invite' : 'Revoke plan'}" aria-label="Revoke" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
+        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptRevokeRelationship('${r.id}', '${r.status}')" title="${r.status === 'pending' ? 'Cancel invite' : 'Revoke plan'}" aria-label="Revoke" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
           <span class="material-symbols-outlined text-[22px] pointer-events-none">close</span>
         </button>
       ` : `
-        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptDeleteRelationship('${r.id}', '${safeName}')" title="Remove from list" aria-label="Remove" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary/60 hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
+        <button type="button" onclick="event.stopPropagation(); event.preventDefault(); promptDeleteRelationship('${r.id}')" title="Remove from list" aria-label="Remove" class="w-10 h-10 rounded-full flex items-center justify-center text-secondary/60 hover:text-error hover:bg-error/10 active:scale-90 transition-all shrink-0 cursor-pointer">
           <span class="material-symbols-outlined text-[20px] pointer-events-none">delete_outline</span>
         </button>
       `}
@@ -4021,16 +4097,24 @@ async function loadRelationships() {
   $("rel-list").innerHTML = itemsHtml + clearBar;
 }
 
-function copyInviteLink(token) {
+async function copyInviteLink(token) {
   const link = `${location.origin}${location.pathname}?invite=${token}`;
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(link).then(
-      () => toast("Link copied — send it to them to get started"),
-      () => window.prompt("Copy this link and send it to them:", link),
-    );
-  } else {
-    window.prompt("Copy this link and send it to them:", link);
+    try {
+      await navigator.clipboard.writeText(link);
+      toast("Link copied — send it to them to get started");
+      return;
+    } catch (_) { /* refused (permissions / insecure page): fall through to the manual box */ }
   }
+  // Couldn't copy automatically: show the link in an in-app box, already selected.
+  // Copy tries again from the button; Close leaves it for the user to copy by hand.
+  const picked = await appPrompt({
+    title: "Copy this link", message: "Send it to them to get started.",
+    initialValue: link, readOnly: true, selectOnOpen: true, confirmText: "Copy", cancelText: "Close",
+  });
+  if (picked === null) return;
+  if (appPromptCopyOk) toast("Link copied — send it to them to get started");
+  else toast("Select the link and press Ctrl+C to copy it", true);
 }
 
 function openCreateInviteModal() {
@@ -4265,7 +4349,14 @@ async function removePendingEntry(activityType) {
 let PENDING_REVOKE_ID = null;
 let PENDING_REVOKE_HARD = false;
 
-function promptRevokeRelationship(id, name, status) {
+// The label shown in the revoke/remove popups, taken from the loaded list by id.
+function relationshipLabel(id) {
+  const r = RELATIONSHIPS_CACHE.find(x => x.id === id);
+  return r ? (r.name || RELATION_LABELS[r.relation_type] || r.relation_type) : "";
+}
+
+function promptRevokeRelationship(id, status) {
+  const name = relationshipLabel(id);
   PENDING_REVOKE_ID = id;
   PENDING_REVOKE_HARD = false;
   const m = $("revoke-rel-modal");
@@ -4289,7 +4380,8 @@ function promptRevokeRelationship(id, name, status) {
   m.classList.add("flex");
 }
 
-function promptDeleteRelationship(id, name) {
+function promptDeleteRelationship(id) {
+  const name = relationshipLabel(id);
   PENDING_REVOKE_ID = id;
   PENDING_REVOKE_HARD = true;
   const m = $("revoke-rel-modal");
@@ -4867,7 +4959,7 @@ Object.assign(window, {
   promptRevokeRelationship, promptDeleteRelationship, closeRevokeModal, executeRevokeRelationship, clearAllRevokedPlans,
   revokeRelationship, openRelationshipDetail, editManagedTarget, editPendingEntry,
   openManagedAddModal, closeManagedAddModal, submitManagedAdd, submitManagedCustomAdd, toggleManagedPerSet,
-  closeAppConfirm,
+  closeAppConfirm, closeAppPrompt,
   openPendingBuild, removePendingEntry, togglePendingCondition, savePendingProfile,
   renderExerciseBrowse, editPendingProfile, removePendingCustomExercise,
   updateManagedActivityFields, updateManagedCustomTargetFields, acceptSuggestedExercise,

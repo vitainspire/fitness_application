@@ -898,6 +898,23 @@
   </div>
 </div>
 
+<!-- In-app replacement for the browser's prompt() box where the typed text must be hidden
+     (delete account asks for the password); opened by appPrompt() in main.js. -->
+<div id="app-prompt-modal" class="fixed inset-0 z-[300] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+     onclick="if (event.target === this) closeAppPrompt(false)" role="dialog" aria-modal="true" aria-labelledby="app-prompt-msg">
+  <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
+    <h3 id="app-prompt-title" class="hidden font-headline-sm text-headline-sm text-on-surface font-bold"></h3>
+    <p id="app-prompt-msg" class="font-body-md text-body-md text-on-surface whitespace-pre-line"></p>
+    <input id="app-prompt-input" type="password" autocomplete="current-password"
+      onkeydown="if (event.key === 'Enter') { event.preventDefault(); closeAppPrompt(true); }"
+      class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+    <div class="flex items-center justify-end gap-sm mt-sm">
+      <button type="button" id="app-prompt-cancel" onclick="closeAppPrompt(false)" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">Cancel</button>
+      <button type="button" id="app-prompt-ok" onclick="closeAppPrompt(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-sm hover:opacity-95 active:scale-95 transition-all">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="revoke-rel-modal" class="fixed inset-0 z-[120] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
      onclick="if (event.target === this) closeRevokeModal()">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">

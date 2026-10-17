@@ -43,6 +43,10 @@ def create_invite(session: Session, manager_user_id: str, relation_type: str, na
         raise ValidationError("Enter their name.")
     if len(name) > 100:
         raise ValidationError("Name must be 100 characters or fewer.")
+    # Same server-side backstop custom exercise names already have: a name reaches
+    # every client verbatim, so don't store markup in it. (Existing rows are untouched.)
+    from app.profile.service import _reject_unsafe_name  # local: import cycle
+    _reject_unsafe_name(name)
     if is_managed_account(session, manager_user_id):
         raise Forbidden(
             "This account is managed by someone else, so it can't create "
