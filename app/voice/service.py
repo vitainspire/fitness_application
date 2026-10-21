@@ -35,6 +35,40 @@ def _spoken_distances_km(transcript: str) -> list[float]:
     return out
 
 
+# A custom (non-taxonomy) exercise can only be measured in reps ("count"), distance ("km") or time
+# ("min"), and a time or distance one is a single effort, not sets (the save rules in
+# app/profile/service.py). The model sometimes keeps the spoken unit ("30 seconds", "500 meters")
+# and per-set amounts; those would be rejected when the user confirms, failing the whole batch.
+# Each spoken set stays a SEPARATE amount (3 x 30 s plank -> 0.5, 0.5, 0.5 min): the confirm step
+# saves a time/distance set as its own single-effort entry.
+_COUNT_UNITS = {"", "count", "rep", "reps", "repetition", "repetitions"}
+_SECOND_UNITS = {"s", "sec", "secs", "second", "seconds"}
+_MINUTE_UNITS = {"min", "mins", "minute", "minutes"}
+_HOUR_UNITS = {"h", "hr", "hrs", "hour", "hours"}
+_KM_UNITS = {"km", "kms", "kilometer", "kilometers", "kilometre", "kilometres"}
+_METER_UNITS = {"m", "meter", "meters", "metre", "metres"}
+_MILE_UNITS = {"mi", "mile", "miles"}
+
+
+def _normalise_custom_amounts(unit, amounts: list[float]):
+    """(unit, amounts) in the only form a custom exercise can be saved in, or None if the unit
+    isn't one we can convert (the entry is then dropped rather than saved wrongly). Every set is
+    converted on its own, so the sets the user spoke are kept (3 x 30 s -> 0.5, 0.5, 0.5 min)."""
+    u = str(unit or "").strip().lower()
+    if u in _COUNT_UNITS:
+        return "count", amounts
+    factors = (
+        [("min", 1.0)] if u in _MINUTE_UNITS else [("min", 1 / 60)] if u in _SECOND_UNITS
+        else [("min", 60.0)] if u in _HOUR_UNITS else [("km", 1.0)] if u in _KM_UNITS
+        else [("km", 0.001)] if u in _METER_UNITS else [("km", 1.609344)] if u in _MILE_UNITS else [])
+    if not factors:
+        return None
+    target, factor = factors[0]
+    converted = [round(a * factor, 2) for a in amounts]
+    converted = [a for a in converted if a > 0]       # a set that rounds to nothing is dropped
+    return (target, converted) if converted else None
+
+
 def _positive_numbers(value) -> list[float]:
     if not isinstance(value, list):
         return []
@@ -92,7 +126,7 @@ Output Schema (JSON object — single pass, no extra API calls):
   "entries": [
     {{
       "activity_type": "exact_code_from_taxonomy_or_null",
-      "activity_name": "clean exercise name if not in taxonomy, else null",
+      "activity_name": "<the exercise's clean English name when activity_type is null; the JSON null value when activity_type is a taxonomy code>",
       "is_custom": false,
       "set_amounts": [number, number, ...],
       "unit": "the canonical unit, per the UNITS rules below",
@@ -111,6 +145,7 @@ Rules:
 - If the user said BOTH a distance and a time (for example "walked 3 km in 40 minutes"), ALWAYS put the spoken distance in set_amounts (here [3]) and the time in duration_minutes. Never leave set_amounts empty when a distance was spoken.
 - activity_type must be an exact taxonomy code from the list above, or null.
 - Never output garbled/nonsensical text from the transcript in activity_name. Always clean it up.
+- CUSTOM EXERCISES: every exercise that is NOT in the taxonomy list above must have activity_type null, is_custom true, and a REAL, non-empty activity_name written in plain English (for example "bench press", "push-ups", "cable fly", "dips"). Never use the words null, none, unknown or n/a as a name, and never leave it empty. Mentioned weights (kg, lbs) are not part of the name and are ignored. The "unit" of a custom exercise must be exactly "count" (reps), "km" (distance) or "min" (time) — a time given in seconds must be converted to minutes, never left as "sec".
 - Never invent reps or sets that were not mentioned.
 - One array item per distinct exercise.
 
@@ -175,6 +210,15 @@ Respond ONLY with the JSON object, no explanation, no markdown.
                         if abs(d - used) < 0.011:
                             del remaining[idx]
                             break
+        # How many distances were spoken at all (digits OR words: "3 km", "two kilometers") versus how many
+        # entries already carry one. A spoken distance that some entry already carries is accounted for, so it
+        # says nothing about a different, time-only entry ("walked two kilometers, jogged thirty minutes").
+        distance_mentions = len(_DISTANCE_WORD.findall(transcript or ""))
+        distance_carried = sum(
+            1 for it in entries_raw
+            if isinstance(it, dict) and _positive_numbers(it.get("set_amounts"))
+            and str(it.get("unit") or "").strip().lower() in (_KM_UNITS | _METER_UNITS | _MILE_UNITS))
+        unaccounted_distance = max(0, distance_mentions - distance_carried)
         needy_count = sum(
             1 for it in entries_raw
             if isinstance(it, dict) and pace_by_code.get(it.get("activity_type"))
@@ -202,9 +246,9 @@ Respond ONLY with the JSON object, no explanation, no markdown.
                     item["set_amounts"] = [remaining[0]]
                     item["unit"] = "km"
                     sets = item["set_amounts"]
-                elif remaining or (mentions_distance and not spoken):
-                    # A distance was said but can't be tied to this entry safely (several
-                    # entries, or a number written in words): don't invent one from the time.
+                elif unaccounted_distance > 0:
+                    # A distance was said that no entry carries and that can't be tied to this one
+                    # safely (several entries, or a number written in words): don't invent one.
                     pass
                 else:
                     # Time only: distance = time / average pace (done here, not by the model).
@@ -224,6 +268,12 @@ Respond ONLY with the JSON object, no explanation, no markdown.
             
             if not valid_sets:
                 continue
+            if item.get("activity_type") is None:
+                # custom exercise: only count / km / min, and one effort for time and distance
+                normalised = _normalise_custom_amounts(item.get("unit"), valid_sets)
+                if normalised is None:
+                    continue
+                item["unit"], valid_sets = normalised
             item["set_amounts"] = valid_sets
             entries.append(item)
             

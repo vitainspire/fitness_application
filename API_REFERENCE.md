@@ -189,7 +189,9 @@ condition, in which case no program is created at all).
 { "referred": false, "message": null, "program": [ /* same shape as GET /v1/program */ ] }
 ```
 If a `refer`-bucket condition was picked: `{"referred": true, "message": "<referral text>", "program": []}`.
-**Age under 18 is rejected** (`422`) — this app is adults-only.
+**Age must be a whole number from 1 to 120** (`422` otherwise). There is deliberately no adult-only age floor.
+**Omitting `condition_codes` is a `422`** (send `[]` for none). If `experience_band` differs from the one on file, the
+plan is rescaled (see "Changes since this document was verified" at the end).
 
 ### `GET /v1/profile`
 🔒 Auth required.
@@ -587,3 +589,17 @@ for r in sorted(app.url_map.iter_rules(), key=str):
         print(sorted(r.methods - {'HEAD','OPTIONS'}), r.rule)
 "
 ```
+
+---
+
+## 11. Changes since this document was verified (2026-10)
+
+- **Personal bests:** `GET /v1/personal-bests` returns `{"activities": {key: [one record]}}` — exactly one record per exercise the user has logged. Reps use the most reps in a single set; holds the longest hold; walk/running/time the longest amount.
+- **Player overwrite:** `POST /v1/activities` accepts `replace_today: true` (catalogue exercise + `workout_session_id` + source `manual` only). It replaces the Workout Player's earlier entry for that exercise today instead of adding to it. `GET /v1/suggestions` items carry `player_log` (the player's saved values for today, or null).
+- **Experience level:** `PUT /v1/profile` and `POST /v1/profile/onboarding` rescale the plan when `experience_band` changes and return `plan_rescaled`. Moving to a LOWER level returns `{"needs_confirmation": true, "reason": "level_down", ...}` and saves nothing until the request is repeated with `"confirm_rescale": true`. `GET /v1/profile` also returns `display_name` (the name a manager gave a managed person, otherwise null).
+- **Voice:** `POST /v1/voice/extract` converts a time-only walk/run into a distance using the exercise's pace (`estimated_from_minutes` marks it); a distance the user said is never replaced. `POST /v1/voice/tts` (JSON `{"text"}` -> `audio/mpeg`) and `POST /v1/voice/stt` (raw audio body -> `{"text"}`) proxy ElevenLabs so its key stays on the server (503 `voice_unavailable` if not configured, 502 `voice_upstream_error` if ElevenLabs fails).
+- **Revoking a managed plan:** `DELETE /v1/relationships/<id>` revokes the link and the manager's access; the person's own session keeps working. Add `?sign_out=true` to also end every session of that person's account (for a leaked link) — the response is `{"status": "revoked", "signed_out": true|false}`. `?delete=true` removes an already-revoked card from the list.
+- **Managed plans:** `PUT /v1/program/entries/<type>/target` with `managed_user_id` and `set_amounts`, and `POST /v1/relationships/<id>/pending-entries` with `set_amounts`, support a different amount for each set.
+- **Ids in URLs** must be UUIDs: anything else is a `404` ("No such endpoint").
+- **Headers:** every response has `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`; responses to requests carrying an `Authorization` header also have `Cache-Control: no-store`.
+- **Revoked sessions:** a revoked access token returns `403` with code `revoked` (not 401); clients should treat it as "sign in again".

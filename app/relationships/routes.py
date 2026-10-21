@@ -2,12 +2,17 @@
 see MANAGED_PLANS_TEACHER_DOCTOR_PARENT_PLAN.md."""
 from __future__ import annotations
 
+import logging
+
 from flask import Blueprint, current_app, g, jsonify, request
 
+from app.auth import tokens as tk
 from app.gateway.middleware import enforce_preauth_rate_limits, require_auth
 from app.platform.db import session_scope
 from app.platform.errors import ValidationError
 from app.relationships import service
+
+log = logging.getLogger(__name__)
 
 bp = Blueprint("relationships", __name__, url_prefix="/v1/relationships")
 
@@ -122,9 +127,23 @@ def open_invite():
 @require_auth
 def revoke(relationship_id: str):
     hard_delete = request.args.get("delete", "").lower() in ("true", "1")
+    sign_out = request.args.get("sign_out", "").lower() in ("true", "1")
     with session_scope() as s:
-        service.revoke_relationship(s, g.user_id, relationship_id, hard_delete=hard_delete)
-    return jsonify({"status": "revoked"})
+        to_sign_out = service.revoke_relationship(
+            s, g.user_id, relationship_id, hard_delete=hard_delete, sign_out=sign_out)
+    # Live access tokens are ended only after the revoke has committed, so a failure above
+    # can never sign someone out of a plan that is still active.
+    signed_out = False
+    if to_sign_out is not None:
+        try:
+            tk.set_tokens_valid_after(to_sign_out, current_app.config["APP_CONFIG"])
+            signed_out = True
+        except Exception:
+            # Refresh tokens are already revoked, so this device can only live until its
+            # short-lived access token expires. Report the revoke as done either way:
+            # a failed response here would tempt a retry, and a second DELETE removes the plan.
+            log.exception("could not end live access tokens for managed account %s", to_sign_out)
+    return jsonify({"status": "revoked", "signed_out": signed_out})
 
 
 @bp.get("/<uid:relationship_id>/activity")

@@ -20,7 +20,7 @@ import psycopg
 EMBEDDING_MODEL = "openai/text-embedding-3-small"
 EMBEDDING_URL = "https://openrouter.ai/api/v1/embeddings"
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-VOICE_CHAT_MODEL = "openai/gpt-4o-mini" # Bypasses free queue for instant responses
+VOICE_CHAT_MODEL = "openai/gpt-4.1-mini"  # tested on a 7-exercise voice log: 8/8 correct, ~4.4 s (4o-mini: 7/8, ~7 s)
 CHAT_MODEL = "openai/gpt-oss-20b"  # paid — OpenRouter discontinued the :free tier
 # for this exact model (confirmed live, 2026-08-24: the :free slug now 404s with
 # "use this slug instead: openai/gpt-oss-20b"). Deliberately the SAME model, not

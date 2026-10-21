@@ -41,6 +41,9 @@ let AT = localStorage.getItem("at"), RT = localStorage.getItem("rt"), EMAIL = lo
 // change it with, logout/delete already blocked) — confirmed directly: the
 // whole screen is removed from their experience, not just those two rows.
 let IS_MANAGED_ACCOUNT = false;
+// The name a manager typed for a managed person (a managed account has no real email, so the
+// email-prefix greeting was blank). Empty for everyone else. Set from /v1/profile by route().
+let MANAGED_DISPLAY_NAME = "";
 
 // Found live: two tabs sharing one login can each get a 401 and call
 // /v1/auth/refresh with the SAME (stale) refresh token at nearly the same
@@ -247,6 +250,14 @@ async function refreshTokenAcrossTabs() {
   });
 }
 
+// A failed fetch() throws a bare TypeError ("Failed to fetch" / "Load failed" / "NetworkError…") when the device
+// is offline or the server can't be reached; say that in plain words instead of the browser's wording.
+function networkFailure(e) {
+  return e instanceof TypeError
+    ? Object.assign(new Error("No internet connection — check it and try again."), {offline: true})
+    : e;
+}
+
 async function api(method, path, body, _retried) {
   const h = {"X-Device-Id": DEV};
   if (body) h["Content-Type"] = "application/json";
@@ -254,7 +265,8 @@ async function api(method, path, body, _retried) {
   // Route the chatbot's own endpoints to its own backend instance (if one is
   // configured — see CHAT_API_BASE above); every other path is unaffected.
   const base = path.startsWith("/v1/rehab/") ? CHAT_API_BASE : API_BASE;
-  const r = await fetch(base + path, {method, headers: h, body: body ? JSON.stringify(body) : undefined});
+  const r = await fetch(base + path, {method, headers: h, body: body ? JSON.stringify(body) : undefined})
+    .catch(e => { throw networkFailure(e); });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
     // Silent renewal (11.1) — the backend's own /v1/auth/refresh docstring
@@ -279,6 +291,15 @@ async function api(method, path, body, _retried) {
         throw Object.assign(new Error("Your session ended — please sign in again."), {status: 401});
       }
     }
+    // 403 with code "revoked" = the server ended this session (logged out elsewhere, or token theft
+    // was detected). A refresh can't fix it, and every later call would fail the same way, so end
+    // the session here like a failed refresh does instead of leaving the user stuck on error toasts.
+    // Only this code: an ordinary 403 (e.g. a managed account's restrictions) is left alone.
+    if (r.status === 403 && d.error?.code === "revoked") {
+      localStorage.clear(); AT = null; RT = null;
+      go("auth");
+      throw Object.assign(new Error("Your session ended — please sign in again."), {status: 401});
+    }
     throw Object.assign(new Error(d.error?.message || r.statusText), {status: r.status});
   }
   return d;
@@ -294,7 +315,7 @@ async function api(method, path, body, _retried) {
 async function authedFetch(path, init = {}, _retried) {
   const headers = {"X-Device-Id": DEV, ...(init.headers || {})};
   if (AT) headers["Authorization"] = "Bearer " + AT;
-  const r = await fetch(API_BASE + path, {...init, headers});
+  const r = await fetch(API_BASE + path, {...init, headers}).catch(e => { throw networkFailure(e); });
   if (r.status === 401 && RT && !_retried) {
     await refreshTokenAcrossTabs();
     return authedFetch(path, init, true);
@@ -391,12 +412,12 @@ function setAuthMode(mode) {
 
   if ($("auth-tab-login")) {
     $("auth-tab-login").className = isLogin
-      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs"
+      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface"
       : "flex-1 py-1.5 text-xs font-bold rounded-full transition-all text-on-surface-variant hover:text-on-surface";
   }
   if ($("auth-tab-signup")) {
     $("auth-tab-signup").className = !isLogin
-      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs"
+      ? "flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface"
       : "flex-1 py-1.5 text-xs font-bold rounded-full transition-all text-on-surface-variant hover:text-on-surface";
   }
   if ($("a-submit-btn")) $("a-submit-btn").textContent = isLogin ? "Sign In" : "Create Account";
@@ -611,6 +632,7 @@ async function doAuth(mode) {
 async function route() {
   const p = await api("GET", "/v1/profile");
   IS_MANAGED_ACCOUNT = !!p.is_managed_account; // read by go()'s own nav-button rendering
+  MANAGED_DISPLAY_NAME = p.display_name || "";
   renderNotifBadge();
   if (!p.onboarded) { await loadOnboarding(); go("onboard"); return; }
   if (p.referred) { $("refer-msg").textContent = "We can't suggest exercises based on what you selected."; go("refer"); $("nav").className = navOnClass(); return; }
@@ -727,7 +749,7 @@ function renderActivityPeriodTabs() {
     <button onclick="selectActivityPeriod(${months})"
       class="px-2 py-0.5 rounded-full text-[10px] font-medium transition-all ${
         months === activityPeriodMonths
-          ? "font-bold bg-primary-fixed text-on-primary-fixed shadow-sm"
+          ? "font-bold bg-primary-fixed text-on-primary-fixed shadow-xs"
           : "text-secondary hover:text-on-background"
       }">${label}</button>`).join("");
   const [, activeLabel] = ACTIVITY_PERIODS.find(([m]) => m === activityPeriodMonths);
@@ -995,7 +1017,7 @@ function renderRecentActivities(entries) {
     return `
       <div class="flex items-center justify-between bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-md hover:bg-white/95 transition-all">
         <div class="flex items-center gap-md">
-          <div class="w-10 h-10 rounded-xl ${badge.bg} border flex items-center justify-center flex-shrink-0 shadow-xs">
+          <div class="w-10 h-10 rounded-xl ${badge.bg} border flex items-center justify-center shrink-0">
             <span class="material-symbols-outlined text-[20px]">${badge.icon}</span>
           </div>
           <div>
@@ -1014,8 +1036,9 @@ function renderRecentActivities(entries) {
 // list itself — formerly "Recommended Today" — now lives entirely inside
 // the guided Workout Player, since it showed exactly the same exercises) ──
 async function loadHome() {
-  $("h-avatar").textContent = (EMAIL[0] || "?").toUpperCase();
-  $("h-hello").textContent = "Welcome back, " + EMAIL.split("@")[0] + "!";
+  const greetName = MANAGED_DISPLAY_NAME || EMAIL.split("@")[0];
+  $("h-avatar").textContent = ((MANAGED_DISPLAY_NAME || EMAIL)[0] || "?").toUpperCase();
+  $("h-hello").textContent = greetName ? "Welcome back, " + greetName + "!" : "Welcome back!";
 
   // Fired together, not sequentially: the summary's streak/suggestions,
   // 365-day trend, and recent activity logs for the dashboard feed.
@@ -1580,7 +1603,9 @@ async function toggleWhisperRecording() {
         // don't start recording behind a hidden modal.
         if (myRun !== voiceRunId || $("voice-modal").classList.contains("hidden")) {
             stream.getTracks().forEach(t => t.stop());
-            isStartingRecording = false;
+            // A cancelled run already released the flag (cancelVoiceLog); only a run
+            // that is still current may clear it, or it would unlock a newer attempt.
+            if (myRun === voiceRunId) isStartingRecording = false;
             return;
         }
 
@@ -1731,10 +1756,10 @@ function renderVoiceConfirmation(replyText) {
     const estimated = !!e.estimated_from_minutes;   // distance worked out from a time (e.g. "walked 30 minutes")
     return e.set_amounts.map((target, idx) => `
       <div class="flex items-center gap-1.5 cursor-pointer select-none" onclick="editVoiceValue(${i}, ${idx})" title="Tap to edit this value">
-        <div class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-sm transition-all bg-white/70 border border-black/10">
+        <div class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-xs transition-all bg-white/70 border border-black/10">
           <span class="material-symbols-outlined text-[20px] text-secondary">edit</span>
         </div>
-        <div class="flex-1 h-11 rounded-xl px-sm flex items-center justify-between shadow-sm border transition-all bg-white/75 border-black/5">
+        <div class="flex-1 h-11 rounded-xl px-sm flex items-center justify-between shadow-xs border transition-all bg-white/75 border-black/5">
           <span class="text-xs font-bold text-on-background">${name} - Set ${idx + 1}</span>
           <span class="text-xs font-bold text-secondary">${estimated ? "≈ " : ""}${target} ${unitLabel}${estimated ? ` (from ${e.estimated_from_minutes} min)` : ""}</span>
         </div>
@@ -1824,9 +1849,17 @@ async function confirmVoiceLog() {
         });
         customId = created.id;
       }
-      entries.push({
-        custom_exercise_id: customId, amount, sets, unit: e.unit, source: "voice",
-      });
+      if (e.unit === "km" || e.unit === "min") {
+        // A custom time or distance exercise is a single effort per entry (the server refuses
+        // "sets" for it), so each spoken set is saved as its own entry; reps keep their sets.
+        e.set_amounts.forEach(v => entries.push({
+          custom_exercise_id: customId, amount: v, sets: 1, unit: e.unit, source: "voice",
+        }));
+      } else {
+        entries.push({
+          custom_exercise_id: customId, amount, sets, unit: e.unit, source: "voice",
+        });
+      }
     }
     const result = await api("POST", "/v1/activities", { entries });
     toast(`Saved · ${result.streak.current} day streak`);
@@ -1849,6 +1882,7 @@ function editVoiceLog() {
 
 function cancelVoiceLog() {
   voiceRunId++;   // whatever the old attempt is doing (recording / transcribing / extracting / speaking) is now stale
+  isStartingRecording = false;   // the mic can be tapped again straight away instead of waiting for the old greeting to finish
   $("voice-modal").classList.add("hidden");
   voiceEntries = [];
   voiceTranscript = "";
@@ -2019,6 +2053,16 @@ function updatePlayerDoneButtonText() {
   }
 }
 
+// "2 x 7 count" is only a blended summary when the sets differ. Show each set's own number instead,
+// exactly as it was entered ("5, 9 count"; "20s, 30s hold"). Same-valued sets keep the "2 x 5" form.
+function playerPrescriptionText(i) {
+  const t = i.set_targets;
+  if (!Array.isArray(t) || t.length < 2 || t.every(v => v === t[0])) return i.prescription;
+  const m = /^\d+\s*x\s*[\d.]+(\S*)(.*)$/.exec(i.prescription || "");
+  if (!m) return i.prescription;
+  return t.map(v => `${v}${m[1]}`).join(", ") + m[2];
+}
+
 function renderPlayerExercise() {
   const total = PLAYER_ITEMS.length;
   const i = PLAYER_ITEMS[playerIndex];
@@ -2031,7 +2075,7 @@ function renderPlayerExercise() {
   $("pl-icon").textContent = icon(i.activity_type);
   $("pl-title").textContent = i.display_name;
   $("pl-done-badge").classList.toggle("hidden", !i.completed);
-  $("pl-prescription").textContent = i.prescription
+  $("pl-prescription").textContent = playerPrescriptionText(i)
     + (i.est_minutes ? ` · about ${i.est_minutes} min` : "")
     + (i.rest_seconds ? ` · ${i.rest_seconds}s rest after` : "");
   $("pl-caution").textContent = i.caution || "";
@@ -2137,17 +2181,17 @@ function renderSetsTable(i) {
     return `
     <div class="flex items-center gap-1.5 select-none">
       <div onclick="playerToggleSet(${idx})" title="Tap to mark Set ${idx + 1} done"
-        class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-sm transition-all cursor-pointer
+        class="w-14 h-11 rounded-xl flex items-center justify-center shrink-0 shadow-xs transition-all cursor-pointer
                   ${done ? "bg-primary-fixed" : "bg-white/70 border border-black/10"}">
         <span class="material-symbols-outlined text-[20px] ${done ? "text-on-primary-fixed" : "text-secondary"}">${done ? "check" : "chevron_right"}</span>
       </div>
-      <div class="flex-1 h-11 rounded-xl pl-sm pr-xs flex items-center justify-between gap-xs shadow-sm border transition-all
+      <div class="flex-1 h-11 rounded-xl pl-sm pr-xs flex items-center justify-between gap-xs shadow-xs border transition-all
                   ${done ? "bg-white/80 border-primary/50" : "bg-white/75 border-black/5"}">
         <span class="text-xs font-bold text-on-background shrink-0">Set ${idx + 1}</span>
         <div class="flex items-center gap-1">
           <input type="number" step="any" value="${actual}" ${done && !i._editing ? "disabled" : ""}
             onchange="updatePlayerSetActual(${idx}, this.value)"
-            class="no-spinner w-14 text-center text-sm font-bold rounded-lg py-1 border-none outline-none
+            class="no-spinner w-14 text-center text-sm font-bold rounded-lg py-1 border-none outline-hidden
                    ${done ? "bg-transparent text-primary" : "bg-surface-container-low text-on-background"}">
           ${unit ? `<span class="text-xs font-bold text-secondary shrink-0">${unit}</span>` : ""}
         </div>
@@ -2474,7 +2518,7 @@ async function submitPlayerEdit() {
     i.set_targets = r.set_targets || null;
     i.auto_progress = r.auto_progress;
     i.prescription = single ? `${r.target_amount} ${i.unit || ""}`.trim()
-                             : `${r.target_sets} x ${r.target_amount}${i.unit ? " " + i.unit : ""}`;
+                             : `${r.target_sets} x ${+r.target_amount}${i.prescription_type === "hold" ? "s" : ""}${i.per_side ? " each side" : ""}`;   // same wording the server uses
     closePlayerEditModal();
     renderPlayerExercise();
     toast("Updated");
@@ -3358,7 +3402,7 @@ function showThinkingBubble() {
       </div>
       <span class="font-label-sm text-label-sm text-on-surface-variant">Coach AI</span>
     </div>
-    <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-sm p-md flex items-center gap-sm">
+    <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-xs p-md flex items-center gap-sm">
       <span class="flex gap-1 shrink-0">
         <span class="w-1.5 h-1.5 rounded-full bg-on-surface-variant animate-bounce" style="animation-delay:0ms"></span>
         <span class="w-1.5 h-1.5 rounded-full bg-on-surface-variant animate-bounce" style="animation-delay:150ms"></span>
@@ -3388,7 +3432,7 @@ function appendChatBubble(text, fromUser) {
   const wrap = document.createElement("div");
   wrap.className = fromUser ? "self-end max-w-[85%]" : "self-start max-w-[90%]";
   wrap.innerHTML = fromUser
-    ? `<div class="bg-primary-container text-on-primary-container rounded-2xl rounded-tr-sm px-md py-sm">
+    ? `<div class="bg-primary-container text-on-primary-container rounded-2xl rounded-tr-xs px-md py-sm">
          <p class="font-body-md text-body-md"></p></div>`
     : `<div class="flex items-end gap-xs mb-1">
          <div class="w-6 h-6 rounded-full bg-primary flex items-center justify-center">
@@ -3396,7 +3440,7 @@ function appendChatBubble(text, fromUser) {
          </div>
          <span class="font-label-sm text-label-sm text-on-surface-variant">Coach AI</span>
        </div>
-       <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-sm p-md">
+       <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-xs p-md">
          <div class="chat-content font-body-md text-body-md text-on-surface-variant"></div>
        </div>`;
   if (fromUser) {
@@ -3590,7 +3634,7 @@ async function loadProfile() {
          real data only, styled in the mockup's language. -->
     <section class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex flex-col gap-md">
       <div class="flex items-center gap-md">
-        <div class="w-20 h-20 rounded-full bg-primary-container border-2 border-primary-fixed flex items-center justify-center font-display-lg-mobile text-on-primary-container shrink-0 shadow-sm">${escapeHtml((EMAIL[0]||"?").toUpperCase())}</div>
+        <div class="w-20 h-20 rounded-full bg-primary-container border-2 border-primary-fixed flex items-center justify-center font-display-lg-mobile text-on-primary-container shrink-0 shadow-xs">${escapeHtml((EMAIL[0]||"?").toUpperCase())}</div>
         <div class="min-w-0 flex-1">
           <h2 class="font-headline-sm text-headline-sm text-on-background truncate">${escapeHtml(EMAIL.split("@")[0])}</h2>
           <div class="flex items-center gap-1.5 mt-1">
@@ -3823,7 +3867,7 @@ function renderTargetChangesHistory() {
     filtersContainer.innerHTML = filters.map(f => {
       const isActive = CURRENT_TARGET_FILTER === f.id;
       const activeClass = isActive
-        ? (f.activeColor || "bg-primary text-white font-bold shadow-xs")
+        ? (f.activeColor || "bg-primary text-white font-bold")
         : "bg-white/70 text-secondary hover:bg-white border-black/5";
       return `
         <button onclick="filterTargetChangesHistory('${f.id}')"
@@ -3864,7 +3908,7 @@ function renderTargetChangesHistory() {
         <!-- Header row -->
         <div class="flex items-start justify-between gap-sm">
           <div class="flex items-center gap-sm">
-            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-black/[0.03] border border-black/5 shrink-0">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-black/3 border border-black/5 shrink-0">
               <span class="material-symbols-outlined text-[22px] text-primary">${exerciseIcon}</span>
             </div>
             <div>
@@ -3884,7 +3928,7 @@ function renderTargetChangesHistory() {
         </div>
 
         <!-- Target Comparison: Old Target -> New Target -->
-        <div class="bg-black/[0.025] rounded-xl p-sm border border-black/5 flex items-center justify-between">
+        <div class="bg-black/2.5 rounded-xl p-sm border border-black/5 flex items-center justify-between">
           <div class="flex flex-col">
             <span class="text-[10px] uppercase font-bold tracking-wider text-secondary">Previous Target</span>
             <span class="font-headline-sm text-[15px] font-bold text-on-background">${item.old_target} ${escapeHtml(item.unit)}</span>
@@ -4102,18 +4146,18 @@ async function copyInviteLink(token) {
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(link);
-      toast("Link copied — send it to them to get started");
+      toast("Link copied — anyone with it can open their plan, so send it privately");
       return;
     } catch (_) { /* refused (permissions / insecure page): fall through to the manual box */ }
   }
   // Couldn't copy automatically: show the link in an in-app box, already selected.
   // Copy tries again from the button; Close leaves it for the user to copy by hand.
   const picked = await appPrompt({
-    title: "Copy this link", message: "Send it to them to get started.",
+    title: "Copy this link", message: "Send it only to them — anyone with this link can open their plan.",
     initialValue: link, readOnly: true, selectOnOpen: true, confirmText: "Copy", cancelText: "Close",
   });
   if (picked === null) return;
-  if (appPromptCopyOk) toast("Link copied — send it to them to get started");
+  if (appPromptCopyOk) toast("Link copied — anyone with it can open their plan, so send it privately");
   else toast("Select the link and press Ctrl+C to copy it", true);
 }
 
@@ -4218,6 +4262,7 @@ async function renderPendingBuild() {
   ]);
   PENDING_SUGGESTIONS_CACHE = suggestions;
   PENDING_ENTRIES_CACHE = entries;
+  PENDING_CUSTOM_CACHE = customEntries;
   const suggestionsHtml = renderSuggestionsSection(suggestions);
   const entriesHtml = entries.map(e => {
     const isDist = e.activity_type === "walk" || e.activity_type === "running";
@@ -4303,6 +4348,8 @@ async function acceptSuggestedExercise(activityType) {
 }
 
 async function removePendingCustomExercise(id) {
+  const c = (PENDING_CUSTOM_CACHE || []).find(x => x.id === id);
+  if (!(await appConfirm({ message: `Remove ${c ? c.name : "this exercise"} from their plan?`, confirmText: "Remove", danger: true }))) return;
   try {
     await api("DELETE", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-custom-exercises/${id}`);
     await renderPendingBuild();
@@ -4340,6 +4387,7 @@ async function savePendingProfile() {
 }
 
 async function removePendingEntry(activityType) {
+  if (!(await appConfirm({ message: `Remove ${activityType.replace(/_/g, " ")} from their plan?`, confirmText: "Remove", danger: true }))) return;
   try {
     await api("DELETE", `/v1/relationships/${CURRENT_RELATIONSHIP}/pending-entries/${activityType}`);
     await renderPendingBuild();
@@ -4370,14 +4418,25 @@ function promptRevokeRelationship(id, status) {
     $("revoke-modal-desc").textContent = `This invite link will be cancelled and will no longer work.`;
     $("revoke-modal-confirm-btn").textContent = "Cancel Invite";
     $("revoke-modal-icon").textContent = "cancel";
+    setRevokeSignOutOption(false);
   } else {
     $("revoke-modal-title").textContent = `Stop Managing ${cleanName}'s Plan?`;
     $("revoke-modal-desc").textContent = `They keep all their current activities and history — you just won't be able to see or edit their plan anymore.`;
     $("revoke-modal-confirm-btn").textContent = "Revoke Plan";
     $("revoke-modal-icon").textContent = "person_remove";
+    setRevokeSignOutOption(true);
   }
   m.classList.remove("hidden");
   m.classList.add("flex");
+}
+
+// The "also sign them out everywhere" checkbox only makes sense when revoking an active plan, and always
+// starts unticked so a normal revoke behaves exactly as before.
+function setRevokeSignOutOption(show) {
+  const wrap = $("revoke-signout-wrap");
+  if (wrap) wrap.classList.toggle("hidden", !show);
+  const box = $("revoke-signout");
+  if (box) box.checked = false;
 }
 
 function promptDeleteRelationship(id) {
@@ -4391,6 +4450,7 @@ function promptDeleteRelationship(id) {
   $("revoke-modal-desc").textContent = `This plan has already been revoked. Removing it clears this card from your list.`;
   $("revoke-modal-confirm-btn").textContent = "Remove";
   $("revoke-modal-icon").textContent = "delete";
+  setRevokeSignOutOption(false);
   m.classList.remove("hidden");
   m.classList.add("flex");
 }
@@ -4401,6 +4461,7 @@ function closeRevokeModal() {
     m.classList.add("hidden");
     m.classList.remove("flex");
   }
+  setRevokeSignOutOption(false);
   PENDING_REVOKE_ID = null;
   PENDING_REVOKE_HARD = false;
 }
@@ -4409,11 +4470,16 @@ async function executeRevokeRelationship() {
   const id = PENDING_REVOKE_ID;
   const hard = PENDING_REVOKE_HARD;
   if (!id) return;
+  const signOut = !hard && !!$("revoke-signout")?.checked;   // read before closing, which resets the box
   closeRevokeModal();
   try {
-    const url = hard ? `/v1/relationships/${id}?delete=true` : `/v1/relationships/${id}`;
-    await api("DELETE", url);
-    toast(hard ? "Removed from list" : "Plan revoked");
+    const url = hard ? `/v1/relationships/${id}?delete=true`
+      : signOut ? `/v1/relationships/${id}?sign_out=true` : `/v1/relationships/${id}`;
+    const r = await api("DELETE", url);
+    toast(hard ? "Removed from list"
+      : !signOut ? "Plan revoked"
+      : r.signed_out ? "Plan revoked — they've been signed out everywhere"
+      : "Plan revoked, but we couldn't sign them out of every device. Their login will expire shortly.", signOut && !r.signed_out);
     await loadRelationships();
   } catch (e) {
     toast(e.message || "Failed to update plan", true);
@@ -4573,6 +4639,7 @@ function setManagedModalMode(editType, pending = false) {
 // It used to be two plain prompt() boxes that could only set one number for
 // every set.
 let PENDING_ENTRIES_CACHE = [];
+let PENDING_CUSTOM_CACHE = [];
 
 // Opens the Add screen as an editor for one plan item, prefilled. Shared by the
 // live plan (saved with a PUT) and a staged item (re-staged, which replaces it).
@@ -5018,6 +5085,7 @@ Object.assign(window, {
     if (e && (e.status === 401 || e.status === 403)) {
       localStorage.clear(); AT = null; RT = null;
       go("auth");
+      toast("Your session ended — please sign in again.", true);
     } else {
       go("home");
       toast("Couldn't reach the server. Pull down to retry in a moment.", true);

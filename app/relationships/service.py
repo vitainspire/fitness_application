@@ -20,6 +20,17 @@ from app.relationships.models import (
 RELATION_TYPES = {"child", "student", "patient", "other"}
 
 
+def managed_display_name(session: Session, user_id: str) -> str | None:
+    """The name the manager typed for this person while the plan is active (null for anyone who
+    isn't a managed account, and for older plans created before names were stored)."""
+    return session.scalar(
+        select(ManagedRelationship.name).where(
+            ManagedRelationship.managed_user_id == user_id,
+            ManagedRelationship.status == "active",
+        ).limit(1)
+    )
+
+
 def is_managed_account(session: Session, user_id: str) -> bool:
     """True if someone else is actively managing this account — a managed
     person (child/student/patient/other) must not also be able to create
@@ -633,15 +644,35 @@ def open_invite(session: Session, cfg: Config, invite_token: str, device_id: str
     return pair, user, row
 
 
-def revoke_relationship(session: Session, manager_user_id: str, relationship_id: str, hard_delete: bool = False) -> None:
+def revoke_relationship(session: Session, manager_user_id: str, relationship_id: str,
+                        hard_delete: bool = False, sign_out: bool = False) -> str | None:
+    """Revoke (or remove) a managed relationship.
+
+    By default the managed person's own account and any session already open on their
+    device are left alone (see "What happens on revocation" in the managed-plans doc).
+    With sign_out=True their refresh tokens are also revoked here, and the account id is
+    returned so the caller can end their live access tokens once this transaction has
+    committed. Returns None when nobody needs signing out (flag off, invite never opened).
+    """
     row = session.get(ManagedRelationship, relationship_id)
     if row is None or row.manager_user_id != manager_user_id:
         raise NotFound("No such managed relationship.")
+    to_sign_out = row.managed_user_id if sign_out else None
+    if to_sign_out == manager_user_id:
+        to_sign_out = None            # never end the caller's own sessions
     if hard_delete or row.status == "revoked":
         session.delete(row)
-        return
-    row.status = "revoked"
-    row.revoked_at = datetime.now(timezone.utc)
+    else:
+        row.status = "revoked"
+        row.revoked_at = datetime.now(timezone.utc)
+    if to_sign_out is not None:
+        from app.auth import tokens as tk
+        from app.auth.models import DevicePushToken
+        tk.revoke_all_refresh_tokens(session, to_sign_out)
+        session.query(DevicePushToken).filter(
+            DevicePushToken.user_id == to_sign_out
+        ).delete(synchronize_session=False)
+    return to_sign_out
 
 
 def clear_revoked_relationships(session: Session, manager_user_id: str) -> int:
