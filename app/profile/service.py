@@ -6,15 +6,19 @@ no suggestions rather than unfiltered ones.
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import json
+import logging
 import uuid
 import math
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,7 +33,11 @@ from app.profile.models import (
 )
 from app.progression.models import ProgressionHistory
 from app.relationships.models import ManagedRelationship
-from app.relationships.service import is_managed_account, require_active_relationship
+from app.relationships.service import (
+    is_managed_account, managed_display_name, require_active_relationship,
+)
+
+_logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))  # single market (3.3)
 
@@ -121,6 +129,41 @@ def list_activities(session: Session) -> list[dict]:
 
 # --- Onboarding ------------------------------------------------------------
 
+# F3 — several read-only endpoints (suggestions, dashboard summary, program) ran the same
+# few lookups over and over inside ONE request (the safety grid and the user's conditions
+# three times each, the "referred" check twice): every repeat is a separate database
+# round-trip, which is what made the home screen take 2-3 s on a remote database. Inside
+# `with _read_cache(session):` those pure lookups are computed once per user and reused.
+# The cache exists ONLY for the duration of that block, which is only ever wrapped around
+# code that does not write, so it can never serve a stale answer — and outside the block the
+# functions behave exactly as before.
+@contextmanager
+def _read_cache(session: Session):
+    if session.info.get("_read_cache") is not None:
+        yield  # already inside a cached read: share the outer cache
+        return
+    session.info["_read_cache"] = {}
+    try:
+        yield
+    finally:
+        session.info.pop("_read_cache", None)
+
+
+def _per_request_cache(fn):
+    @functools.wraps(fn)
+    def wrapper(session: Session, user_id: str, *args, **kwargs):
+        cache = session.info.get("_read_cache")
+        if cache is None or args or kwargs:
+            return fn(session, user_id, *args, **kwargs)
+        key = (fn.__name__, user_id)
+        if key not in cache:
+            cache[key] = fn(session, user_id)
+        value = cache[key]
+        return dict(value) if isinstance(value, dict) else value  # callers get their own copy
+    return wrapper
+
+
+@_per_request_cache
 def is_referred(session: Session, user_id: str) -> bool:
     """True if any selected condition is in the refer bucket (13.3b).
 
@@ -189,6 +232,14 @@ def complete_onboarding(session: Session, user_id: str, *, age: int, goal: str,
     level_changed = previous_band is not None and previous_band != experience_band
     if level_changed and _is_level_down(previous_band, experience_band) and not confirm_rescale:
         return _level_down_confirmation()
+    if previous is not None and codes == ["none"]:
+        had = session.scalar(
+            select(func.count()).select_from(UserCondition).where(
+                UserCondition.user_id == user_id, UserCondition.condition_code != "none"))
+        if had:
+            # Not blocked (re-running onboarding is how the profile editor works), but a
+            # health-conditions wipe should leave a trace.
+            _logger.info("Onboarding re-run replaced %s condition(s) with none for user %s", had, user_id)
 
     session.merge(UserProfile(
         user_id=user_id, age=age, goal=goal,
@@ -392,6 +443,7 @@ def update_profile(session: Session, user_id: str, *, fields: dict,
 _VERDICT_RANK = {"safe": 0, "modify": 1, "avoid": 2}
 
 
+@_per_request_cache
 def _interaction_verdicts(session: Session, user_id: str) -> dict[str, dict]:
     """Combined-conditions safety check (MULTI_CONDITION_INTERACTION_SAFETY_PLAN.md):
     activity_type -> the worst interaction verdict across every PAIR of this
@@ -427,7 +479,8 @@ def _interaction_verdicts(session: Session, user_id: str) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for cell in rows:
-        assert (cell.condition_a, cell.condition_b) in pairs  # see filter comment above
+        if (cell.condition_a, cell.condition_b) not in pairs:  # see filter comment above
+            continue  # can't happen; skipped (not asserted) so `python -O` behaves identically
         current = out.get(cell.activity_type)
         if current is not None and _VERDICT_RANK[current["verdict"]] >= _VERDICT_RANK[cell.verdict]:
             continue
@@ -443,6 +496,7 @@ def _interaction_verdicts(session: Session, user_id: str) -> dict[str, dict]:
     return out
 
 
+@_per_request_cache
 def _blocked_activities(session: Session, user_id: str) -> dict[str, str]:
     """activity_type -> note, for anything the grid marks `avoid` — either a
     single condition on its own, or two of the user's conditions together
@@ -460,6 +514,7 @@ def _blocked_activities(session: Session, user_id: str) -> dict[str, str]:
     return out
 
 
+@_per_request_cache
 def _modified_activities(session: Session, user_id: str) -> dict[str, str]:
     rows = session.execute(
         select(SafetyGridCell.activity_type, SafetyGridCell.note)
@@ -603,6 +658,11 @@ def build_program(session: Session, user_id: str) -> list[dict]:
 
 
 def get_program(session: Session, user_id: str, *, include_suspended: bool = False) -> list[dict]:
+    with _read_cache(session):  # read-only below: see _read_cache
+        return _get_program(session, user_id, include_suspended=include_suspended)
+
+
+def _get_program(session: Session, user_id: str, *, include_suspended: bool = False) -> list[dict]:
     if is_referred(session, user_id):
         return []
     modified = _modified_activities(session, user_id)
@@ -1328,6 +1388,18 @@ def list_personal_bests(session: Session, user_id: str) -> dict:
     return out
 
 
+def _bump_session_count(session: Session, workout_session: WorkoutSession, delta: int) -> None:
+    """Adds `delta` to a workout session's completed-exercise count atomically in the database
+    (a Python-side `+= 1` loses an update when two requests overlap), never below zero."""
+    session.execute(
+        update(WorkoutSession)
+        .where(WorkoutSession.id == workout_session.id)
+        .values(completed_activity_count=func.greatest(WorkoutSession.completed_activity_count + delta, 0))
+        .execution_options(synchronize_session=False)
+    )
+    session.expire(workout_session, ["completed_activity_count"])  # reload on next read
+
+
 def log_activity(session: Session, user_id: str, *, activity_type: str | None = None,
                  custom_exercise_id: str | None = None, amount: float = 0.0, sets: int = 1,
                  unit: str | None = None, source: str = "manual",
@@ -1520,8 +1592,8 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
             # back so a session never claims more completed exercises than it
             # has entries (the new one re-adds it to the current session below).
             old_session = session.get(WorkoutSession, old.workout_session_id)
-            if old_session is not None and old_session.completed_activity_count > 0:
-                old_session.completed_activity_count -= 1
+            if old_session is not None:
+                _bump_session_count(session, old_session, -1)
             # A personal best earned by the entry being corrected must go with
             # it (PersonalBest.source_log_id would otherwise just be nulled and
             # the possibly-mistaken record would live on). Any exercise type.
@@ -1554,9 +1626,9 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
         try:
             with session.begin_nested():
                 session.add(log)
-                if workout_session:
-                    workout_session.completed_activity_count += 1
                 session.flush()
+                if workout_session:
+                    _bump_session_count(session, workout_session, 1)
         except IntegrityError:
             existing = session.scalar(
                 select(ActivityLog).where(
@@ -1572,9 +1644,9 @@ def log_activity(session: Session, user_id: str, *, activity_type: str | None = 
                     "total_volume": float(existing.total_volume)}
     else:
         session.add(log)
-        if workout_session:
-            workout_session.completed_activity_count += 1
         session.flush()
+        if workout_session:
+            _bump_session_count(session, workout_session, 1)
     if extraordinary:
         _save_personal_best(session, user_id, row_activity_type, total, unit, log.id)
     return {"id": log.id, "duplicate": False, "implausible": implausible,
@@ -1716,20 +1788,27 @@ WATER_DAILY_CAP = 40  # sanity ceiling, not a real medical limit -- just
 
 def add_water_glass(session: Session, user_id: str) -> dict:
     today = today_ist()
-    row = session.get(WaterIntakeLog, (user_id, today))
-    if row is None:
-        row = WaterIntakeLog(user_id=user_id, local_date=today, glasses_count=0)
-        session.add(row)
-    if row.glasses_count >= WATER_DAILY_CAP:
+    # One atomic statement: create today's row at 1, or add 1 to it — unless it is already at
+    # the daily cap, in which case nothing is returned. (Reading the count, adding 1 in
+    # Python and saving lost taps when requests overlapped, and two simultaneous FIRST taps
+    # of a day both tried to create the row.)
+    stmt = pg_insert(WaterIntakeLog).values(user_id=user_id, local_date=today, glasses_count=1)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[WaterIntakeLog.user_id, WaterIntakeLog.local_date],
+        set_={"glasses_count": WaterIntakeLog.glasses_count + 1},
+        where=WaterIntakeLog.glasses_count < WATER_DAILY_CAP,
+    ).returning(WaterIntakeLog.glasses_count)
+    count = session.execute(stmt).scalar()
+    if count is None:
         raise ValidationError(f"Cannot log more than {WATER_DAILY_CAP} glasses in one day.")
-    row.glasses_count += 1
-    session.flush()
-    return {"glasses_count": row.glasses_count, "date": today.isoformat()}
+    return {"glasses_count": count, "date": today.isoformat()}
 
 
 def get_water_today(session: Session, user_id: str) -> dict:
     today = today_ist()
-    row = session.get(WaterIntakeLog, (user_id, today))
+    # populate_existing: add_water_glass updates the row in the database directly, so an
+    # instance this session loaded earlier must not be served stale.
+    row = session.get(WaterIntakeLog, (user_id, today), populate_existing=True)
     return {"glasses_count": row.glasses_count if row else 0, "date": today.isoformat()}
 
 
@@ -2217,6 +2296,11 @@ def _dashboard_slice(session: Session, user_id: str
 
 
 def suggestions_today(session: Session, user_id: str, limit: int = 3) -> dict:
+    with _read_cache(session):  # read-only below: see _read_cache
+        return _suggestions_today(session, user_id, limit)
+
+
+def _suggestions_today(session: Session, user_id: str, limit: int = 3) -> dict:
     if is_referred(session, user_id):
         return {"referred": True, "message": REFERRAL_MESSAGE, "items": []}
 
@@ -2443,4 +2527,7 @@ def profile_summary(session: Session, user_id: str) -> dict:
         # managed person can't also manage others — the frontend hides the
         # "Manage Plans for Others" entry point based on this.
         "is_managed_account": is_managed_account(session, user_id),
+        # The name the manager gave a managed person, so their own screen can greet them
+        # by it (a managed account has no real email). Null for everyone else.
+        "display_name": managed_display_name(session, user_id),
     }

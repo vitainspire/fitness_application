@@ -6,7 +6,6 @@
 <title>Fitness App</title>
 <link rel="icon" href="data:,">
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;700&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
   @keyframes talkBounce {
@@ -34,7 +33,7 @@
   <div class="max-w-md mx-auto px-container-margin pt-xl">
     <div class="flex items-center justify-between mb-sm">
       <div class="flex items-center gap-2">
-        <div class="w-8 h-8 rounded-xl bg-primary-container text-on-primary-fixed flex items-center justify-center font-bold text-sm shadow-xs">V</div>
+        <div class="w-8 h-8 rounded-xl bg-primary-container text-on-primary-fixed flex items-center justify-center font-bold text-sm">V</div>
         <span class="text-sm font-extrabold tracking-tight text-on-surface">ViTAinspire</span>
       </div>
     </div>
@@ -44,7 +43,7 @@
     <!-- Tab switcher -->
     <div class="flex items-center bg-surface-container-low p-1 rounded-full mb-md">
       <button type="button" id="auth-tab-login" onclick="setAuthMode('login')"
-        class="flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface shadow-xs">
+        class="flex-1 py-1.5 text-xs font-bold rounded-full transition-all bg-white text-on-surface">
         Sign In
       </button>
       <button type="button" id="auth-tab-signup" onclick="setAuthMode('signup')"
@@ -57,7 +56,7 @@
       <div>
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Email</label>
         <input id="a-email" type="email" placeholder="you@example.com" autocomplete="email"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
       </div>
       <div>
         <div class="flex items-center justify-between">
@@ -66,7 +65,7 @@
         <div class="relative mt-xs">
           <input id="a-pass" type="password" placeholder="Enter password" autocomplete="current-password"
             oninput="if((window.authMode||'login')==='signup') checkPasswordRules('a-pass', null, 'a')"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('a-pass', 'a-pass-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="a-pass-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -122,7 +121,7 @@
 <section id="s-reset-password" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-xl">
     <div class="flex items-center gap-xs mb-sm">
-      <button type="button" onclick="go('auth')" class="w-8 h-8 rounded-full flex items-center justify-center bg-white/80 hover:bg-white text-on-surface-variant shadow-xs">
+      <button type="button" onclick="go('auth')" class="w-8 h-8 rounded-full flex items-center justify-center bg-white/80 hover:bg-white text-on-surface-variant">
         <span class="material-symbols-outlined text-sm">arrow_back</span>
       </button>
       <span class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">ViTAinspire Security</span>
@@ -135,7 +134,7 @@
       <div id="r-token-wrap">
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Reset Code / Token</label>
         <input id="r-token" type="text" placeholder="Paste reset code from email" autocomplete="one-time-code"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-mono text-xs focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-mono text-xs focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
         <p class="font-label-sm text-[11px] text-on-surface-variant mt-1">Emailed to you from <span class="font-semibold text-on-surface">ayush.kumar@vitainspire.com</span></p>
       </div>
 
@@ -145,7 +144,7 @@
         <div class="relative mt-xs">
           <input id="r-pass" type="password" autocomplete="new-password" placeholder="Enter new password"
             oninput="checkPasswordRules('r-pass', 'r-pass-confirm', 'r')"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('r-pass', 'r-pass-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="r-pass-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -158,7 +157,7 @@
         <div class="relative mt-xs">
           <input id="r-pass-confirm" type="password" autocomplete="new-password" placeholder="Re-type new password"
             oninput="checkPasswordRules('r-pass', 'r-pass-confirm', 'r')"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('r-pass-confirm', 'r-confirm-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="r-confirm-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -219,7 +218,7 @@
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Age</label>
         <input id="o-age" type="number" value="30" min="1"
-          class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
       </div>
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Experience</label>
@@ -256,20 +255,21 @@
 
 <!-- ════════ ACTIVITY (dashboard + logging, as page2) ════════ -->
 <section id="s-home" class="screen">
-  <header class="sticky top-0 z-40" style="background-color: rgba(249,249,252,0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-bottom: 1px solid rgba(0,0,0,0.06);">
+  <header role="banner" class="sticky top-0 z-40" style="background-color: rgba(249,249,252,0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-bottom: 1px solid rgba(0,0,0,0.06);">
     <div class="flex justify-between items-center px-container-margin py-md w-full max-w-md mx-auto">
       <div class="flex items-center gap-sm">
-        <div id="h-avatar" class="w-10 h-10 rounded-full bg-surface-container-high border border-black/5 flex items-center justify-center flex-shrink-0 font-label-bold text-on-primary-container"></div>
+        <div id="h-avatar" class="w-10 h-10 rounded-full bg-surface-container-high border border-black/5 flex items-center justify-center shrink-0 font-label-bold text-on-primary-container"></div>
         <h1 id="h-hello" class="font-headline-sm text-headline-sm font-bold text-on-background"></h1>
       </div>
-      <button onclick="go('notifications')" class="relative w-10 h-10 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 backdrop-blur-md transition-colors text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('notifications')" class="relative w-10 h-10 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 backdrop-blur-md transition-colors text-on-background border border-white/80">
         <span class="material-symbols-outlined text-xl">notifications</span>
         <span id="h-notif-badge" class="hidden absolute top-0 right-0 min-w-[18px] h-[18px] px-1 rounded-full bg-error text-on-error text-[10px] font-bold flex items-center justify-center leading-none">0</span>
       </button>
     </div>
   </header>
 
-  <main class="px-container-margin py-md space-y-xl max-w-md mx-auto">
+  <!-- pb-32: extra room so the last card (Water Intake +) can scroll above the floating Premium Voice pill and mic -->
+  <main class="px-container-margin pt-md pb-32 space-y-xl max-w-md mx-auto">
     <!-- The exercise list itself (formerly a "Recommended Today" grid here)
          now lives entirely inside the guided Workout Player, reached via the
          dumbbell bottom-nav icon — it showed exactly the same exercises, so
@@ -289,10 +289,10 @@
          mockup's 3 decorative ones — dropping Best Streak just for a cosmetic
          count match would lose real information for no real reason. -->
     <section class="space-y-md">
-      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 rounded-2xl p-4 shadow-sm space-y-3.5">
+      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 rounded-2xl p-4 shadow-xs space-y-3.5">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-600 shadow-xs flex-shrink-0">
+            <div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-600 shrink-0">
               <span class="material-symbols-outlined text-[17px]">calendar_month</span>
             </div>
             <div>
@@ -300,7 +300,7 @@
               <p id="h-heatmap-period-label" class="text-[11px] text-secondary mt-0.5">Activity frequency across recorded sessions</p>
             </div>
           </div>
-          <div id="h-heatmap-period-tabs" class="flex items-center gap-1 bg-black/[0.04] p-1 rounded-full border border-black/5 self-start sm:self-auto"></div>
+          <div id="h-heatmap-period-tabs" class="flex items-center gap-1 bg-black/4 p-1 rounded-full border border-black/5 self-start sm:self-auto"></div>
         </div>
 
         <div class="flex gap-[3px]">
@@ -316,8 +316,8 @@
 
         <div class="pt-3 border-t border-black/5 flex flex-col gap-2.5">
           <div class="grid grid-cols-4 gap-2">
-            <div class="bg-gradient-to-br from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/20 rounded-xl p-2 flex items-center gap-1.5 shadow-xs">
-              <div class="w-7 h-7 rounded-lg bg-gradient-to-tr from-amber-500 to-orange-400 flex items-center justify-center text-white shadow-xs flex-shrink-0">
+            <div class="bg-linear-to-br/srgb from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/20 rounded-xl p-2 flex items-center gap-1.5">
+              <div class="w-7 h-7 rounded-lg bg-linear-to-tr/srgb from-amber-500 to-orange-400 flex items-center justify-center text-white shrink-0">
                 <span class="material-symbols-outlined text-[15px]">local_fire_department</span>
               </div>
               <div class="min-w-0">
@@ -325,8 +325,8 @@
                 <div class="text-[9px] font-semibold text-amber-800/80 uppercase tracking-wider truncate">Streak</div>
               </div>
             </div>
-            <div class="bg-gradient-to-br from-emerald-500/10 via-emerald-500/5 to-transparent border border-emerald-500/20 rounded-xl p-2 flex items-center gap-1.5 shadow-xs">
-              <div class="w-7 h-7 rounded-lg bg-emerald-500 flex items-center justify-center text-white shadow-xs flex-shrink-0">
+            <div class="bg-linear-to-br/srgb from-emerald-500/10 via-emerald-500/5 to-transparent border border-emerald-500/20 rounded-xl p-2 flex items-center gap-1.5">
+              <div class="w-7 h-7 rounded-lg bg-emerald-500 flex items-center justify-center text-white shrink-0">
                 <span class="material-symbols-outlined text-[15px]">bolt</span>
               </div>
               <div class="min-w-0">
@@ -334,8 +334,8 @@
                 <div class="text-[9px] font-semibold text-emerald-800/80 uppercase tracking-wider truncate">Active</div>
               </div>
             </div>
-            <div class="bg-gradient-to-br from-[#c8f323]/25 via-lime-400/10 to-transparent border border-[#a3e635]/40 rounded-xl p-2 flex items-center gap-1.5 shadow-xs">
-              <div class="w-7 h-7 rounded-lg bg-primary-fixed border border-[#a3e635]/60 flex items-center justify-center text-on-primary-fixed shadow-xs flex-shrink-0">
+            <div class="bg-linear-to-br/srgb from-primary-fixed/25 via-lime-400/10 to-transparent border border-[#a3e635]/40 rounded-xl p-2 flex items-center gap-1.5">
+              <div class="w-7 h-7 rounded-lg bg-primary-fixed border border-[#a3e635]/60 flex items-center justify-center text-on-primary-fixed shrink-0">
                 <span class="material-symbols-outlined text-[15px]">verified</span>
               </div>
               <div class="min-w-0">
@@ -343,8 +343,8 @@
                 <div class="text-[9px] font-semibold text-emerald-900/80 uppercase tracking-wider truncate">This Month</div>
               </div>
             </div>
-            <div class="bg-gradient-to-br from-sky-500/10 via-sky-500/5 to-transparent border border-sky-500/20 rounded-xl p-2 flex items-center gap-1.5 shadow-xs">
-              <div class="w-7 h-7 rounded-lg bg-sky-500 flex items-center justify-center text-white shadow-xs flex-shrink-0">
+            <div class="bg-linear-to-br/srgb from-sky-500/10 via-sky-500/5 to-transparent border border-sky-500/20 rounded-xl p-2 flex items-center gap-1.5">
+              <div class="w-7 h-7 rounded-lg bg-sky-500 flex items-center justify-center text-white shrink-0">
                 <span class="material-symbols-outlined text-[15px]">emoji_events</span>
               </div>
               <div class="min-w-0">
@@ -357,11 +357,11 @@
             <p id="h-heatmap-insight" class="hidden flex items-center gap-1.5 text-emerald-800/70 font-medium"></p>
             <div class="flex items-center gap-1 text-[10px] text-secondary ml-auto">
               <span class="font-medium">Less</span>
-              <span class="w-2.5 h-2.5 rounded-[2.5px] bg-black/[0.04] border border-black/5"></span>
+              <span class="w-2.5 h-2.5 rounded-[2.5px] bg-black/4 border border-black/5"></span>
               <span class="w-2.5 h-2.5 rounded-[2.5px] bg-[#bbf7d0]"></span>
               <span class="w-2.5 h-2.5 rounded-[2.5px] bg-[#4ade80]"></span>
               <span class="w-2.5 h-2.5 rounded-[2.5px] bg-[#a3e635]"></span>
-              <span class="w-2.5 h-2.5 rounded-[2.5px] bg-[#d4ff33] shadow-[0_0_5px_rgba(212,255,51,0.85)]"></span>
+              <span class="w-2.5 h-2.5 rounded-[2.5px] bg-primary-container shadow-[0_0_5px_rgba(212,255,51,0.85)]"></span>
               <span class="font-medium">More</span>
             </div>
           </div>
@@ -432,13 +432,13 @@
        Per-device preference (localStorage), not account data. Kept tiny and
        out of the scrollable content — found live: a full card section here
        ate a large chunk of Dashboard space for a single on/off switch. -->
-  <div class="fixed bottom-44 right-container-margin z-50 flex items-center gap-xs bg-white/90 backdrop-blur-md rounded-full pl-sm pr-xs py-xs shadow-md border border-white/80" title="Premium Voice (ElevenLabs) — off uses a free local pipeline instead">
+  <div role="region" aria-label="Voice settings" class="fixed bottom-44 right-container-margin z-50 flex items-center gap-xs bg-white/90 backdrop-blur-md rounded-full pl-sm pr-xs py-xs shadow-md border border-white/80" title="Premium Voice (ElevenLabs) — off uses a free local pipeline instead">
     <span class="material-symbols-outlined text-primary text-[16px]">graphic_eq</span>
     <span class="text-[11px] font-bold text-on-background whitespace-nowrap">Premium Voice</span>
     <label class="relative inline-flex items-center cursor-pointer">
-      <input id="elevenlabs-toggle" type="checkbox" onchange="setElevenLabsEnabled(this.checked)" class="sr-only peer">
+      <input id="elevenlabs-toggle" type="checkbox" aria-label="Premium Voice" onchange="setElevenLabsEnabled(this.checked)" class="sr-only peer">
       <div class="w-9 h-5 bg-black/15 peer-checked:bg-primary rounded-full transition-colors"></div>
-      <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4"></div>
+      <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform peer-checked:translate-x-4"></div>
     </label>
   </div>
 
@@ -473,8 +473,8 @@
     <div id="pl-progress" class="flex gap-1.5 w-full mb-3.5 h-1.5"></div>
     <div class="flex items-center justify-between mb-lg">
       <div class="flex items-center gap-2.5 text-xs">
-        <span id="pl-counter" class="px-2 py-0.5 text-[11px] font-bold text-on-primary-fixed bg-primary-fixed rounded-full shadow-sm"></span>
-        <div class="flex items-center font-mono text-[11px] font-bold text-on-background bg-white/75 px-2 py-0.5 rounded-md border border-black/5 shadow-sm">
+        <span id="pl-counter" class="px-2 py-0.5 text-[11px] font-bold text-on-primary-fixed bg-primary-fixed rounded-full shadow-xs"></span>
+        <div class="flex items-center font-mono text-[11px] font-bold text-on-background bg-white/75 px-2 py-0.5 rounded-md border border-black/5 shadow-xs">
           <span class="material-symbols-outlined text-[13px] mr-1 text-primary">timer</span>
           <span id="pl-clock">0:00</span>
         </div>
@@ -484,23 +484,23 @@
              modal now that Recommended Today moved entirely into this
              screen — adding one here appends it to the live session
              (refreshPlayerItems in main.js) instead of requiring a restart. -->
-        <button onclick="openCatalogue()" aria-label="Add exercise" class="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
+        <button onclick="openCatalogue()" aria-label="Add exercise" class="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs active:scale-95 transition-all">
           <span class="material-symbols-outlined text-[16px] text-primary">add</span>
           <span class="text-[11px] font-bold">Add</span>
         </button>
         <!-- Removes the CURRENT exercise from today's plan, same effect as
              removing it from Settings' exercise list would have — just
              reachable mid-session instead of requiring a restart. -->
-        <button onclick="playerEditCurrent()" aria-label="Edit sets/amount" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
+        <button onclick="playerEditCurrent()" aria-label="Edit sets/amount" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs active:scale-95 transition-all">
           <span class="material-symbols-outlined text-[18px]">edit</span>
         </button>
-        <button onclick="playerRemoveCurrent()" aria-label="Remove this exercise" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-error border border-black/5 shadow-sm active:scale-95 transition-all">
+        <button onclick="playerRemoveCurrent()" aria-label="Remove this exercise" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-error border border-black/5 shadow-xs active:scale-95 transition-all">
           <span class="material-symbols-outlined text-[18px]">delete</span>
         </button>
-        <button onclick="playerTogglePause()" aria-label="Pause workout" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
+        <button onclick="playerTogglePause()" aria-label="Pause workout" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs active:scale-95 transition-all">
           <span id="pl-pause-icon" class="material-symbols-outlined text-[18px]">pause</span>
         </button>
-        <button onclick="closePlayer()" aria-label="End workout" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm active:scale-95 transition-all">
+        <button onclick="closePlayer()" aria-label="End workout" class="p-1.5 rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs active:scale-95 transition-all">
           <span class="material-symbols-outlined text-[18px]">close</span>
         </button>
       </div>
@@ -523,7 +523,7 @@
             <span class="live-dot w-2 h-2 rounded-full bg-primary-fixed shrink-0"></span>
             <span id="pl-video-footer-label" class="text-xs font-extrabold text-on-background truncate"></span>
           </div>
-          <span class="text-[10px] font-bold text-[#526600] bg-[#526600]/10 border border-[#526600]/20 px-2.5 py-0.5 rounded-full whitespace-nowrap">▶ Demo</span>
+          <span class="text-[10px] font-bold text-primary bg-primary/10 border border-primary/20 px-2.5 py-0.5 rounded-full whitespace-nowrap">▶ Demo</span>
         </div>
       </div>
 
@@ -533,7 +533,7 @@
           Current Exercise
         </div>
         <div class="flex items-center gap-3">
-          <div class="w-14 h-14 rounded-2xl bg-white/80 border border-black/10 flex items-center justify-center shrink-0 shadow-sm">
+          <div class="w-14 h-14 rounded-2xl bg-white/80 border border-black/10 flex items-center justify-center shrink-0 shadow-xs">
             <span id="pl-icon" class="material-symbols-outlined text-primary text-[28px]"></span>
           </div>
           <div class="flex-1 min-w-0">
@@ -547,16 +547,16 @@
         <p id="pl-caution" class="hidden font-label-sm text-label-sm text-on-error-container bg-error-container rounded-xl px-sm py-xs"></p>
 
         <!-- Distance / Duration editor for single-effort exercises (walk, run, etc.) -->
-        <div id="pl-distance-editor" class="hidden flex items-center justify-between bg-black/[0.04] border border-black/5 rounded-2xl p-3 mt-1">
+        <div id="pl-distance-editor" class="hidden flex items-center justify-between bg-black/4 border border-black/5 rounded-2xl p-3 mt-1">
           <div>
             <p class="text-[11px] font-bold text-secondary uppercase tracking-wider">Completed Distance</p>
             <p class="text-[11px] text-secondary">Target: <span id="pl-target-val" class="font-bold text-on-background"></span> · <button type="button" onclick="playerUseTarget()" class="text-primary font-bold hover:underline">Use target</button></p>
           </div>
           <div class="flex items-center gap-1.5">
-            <button type="button" onclick="playerAdjustDistance(-0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base shadow-xs active:scale-95 text-on-background">-</button>
-            <input id="pl-distance-input" type="number" step="0.05" min="0" class="w-20 text-center font-black text-sm bg-white border border-black/10 rounded-xl py-1.5 px-1 shadow-xs text-on-background focus:ring-2 focus:ring-primary/40 focus:outline-none" oninput="playerSetDistance(this.value)" />
+            <button type="button" onclick="playerAdjustDistance(-0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base active:scale-95 text-on-background">-</button>
+            <input id="pl-distance-input" type="number" step="0.05" min="0" class="w-20 text-center font-black text-sm bg-white border border-black/10 rounded-xl py-1.5 px-1 text-on-background focus:ring-2 focus:ring-primary/40 focus:outline-hidden" oninput="playerSetDistance(this.value)" />
             <span id="pl-distance-unit" class="text-xs font-bold text-secondary">km</span>
-            <button type="button" onclick="playerAdjustDistance(0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base shadow-xs active:scale-95 text-on-background">+</button>
+            <button type="button" onclick="playerAdjustDistance(0.1)" class="w-8 h-8 rounded-xl bg-white border border-black/10 flex items-center justify-center font-bold text-base active:scale-95 text-on-background">+</button>
           </div>
         </div>
 
@@ -582,25 +582,25 @@
         </div>
         <div class="flex items-center gap-2">
           <button onclick="playerAddRestTime()" class="text-[11px] font-bold text-secondary hover:text-on-background px-2.5 py-1 rounded-lg bg-black/5 hover:bg-black/10 border border-black/5 active:scale-95 transition-all">+15s</button>
-          <button onclick="playerSkipRest()" class="text-[11px] font-bold text-on-primary-fixed bg-primary-fixed hover:brightness-105 px-3 py-1 rounded-lg shadow-sm active:scale-95 transition-all">Skip Rest</button>
+          <button onclick="playerSkipRest()" class="text-[11px] font-bold text-on-primary-fixed bg-primary-fixed hover:brightness-105 px-3 py-1 rounded-lg shadow-xs active:scale-95 transition-all">Skip Rest</button>
         </div>
       </div>
 
       <!-- Only for Walking/Running — same live-GPS tracker as the Dashboard's
            shortcut, just logged against THIS player session instead of
            starting a new one, so it still counts as part of today's workout. -->
-      <button id="pl-gps-btn" onclick="openGpsTrackerForPlayer()" class="hidden w-full mb-sm flex items-center justify-center gap-xs bg-white/80 hover:bg-white text-on-background border border-black/10 font-label-bold text-label-bold py-sm rounded-2xl shadow-sm active:scale-[0.98] transition-all">
+      <button id="pl-gps-btn" onclick="openGpsTrackerForPlayer()" class="hidden w-full mb-sm flex items-center justify-center gap-xs bg-white/80 hover:bg-white text-on-background border border-black/10 font-label-bold text-label-bold py-sm rounded-2xl shadow-xs active:scale-[0.98] transition-all">
         <span class="material-symbols-outlined text-[18px]">near_me</span> Track with GPS instead
       </button>
 
       <div class="flex items-center justify-between gap-sm">
-        <button onclick="playerGo(-1)" id="pl-prev" class="w-11 h-11 flex items-center justify-center rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm disabled:opacity-30 active:scale-95 transition-all">
+        <button onclick="playerGo(-1)" id="pl-prev" class="w-11 h-11 flex items-center justify-center rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs disabled:opacity-30 active:scale-95 transition-all">
           <span class="material-symbols-outlined">chevron_left</span>
         </button>
         <button id="pl-done-btn" onclick="playerMarkDone()" class="flex-1 bg-primary-fixed hover:brightness-105 active:scale-[0.98] text-on-primary-fixed font-black py-3 px-6 rounded-2xl shadow-[0_4px_20px_rgba(212,255,51,0.35)] transition-all">
           Mark Done
         </button>
-        <button onclick="playerGo(1)" id="pl-next" class="w-11 h-11 flex items-center justify-center rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-sm disabled:opacity-30 active:scale-95 transition-all">
+        <button onclick="playerGo(1)" id="pl-next" class="w-11 h-11 flex items-center justify-center rounded-full bg-white/75 hover:bg-white text-on-background border border-black/5 shadow-xs disabled:opacity-30 active:scale-95 transition-all">
           <span class="material-symbols-outlined">chevron_right</span>
         </button>
       </div>
@@ -609,7 +609,7 @@
       <div id="pl-soreness-prompt" class="hidden mt-2">
         <div class="frosted-glass-card rounded-[22px] p-3.5">
           <div class="flex items-center gap-2.5 mb-3">
-            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-sm shrink-0">
+            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-xs shrink-0">
               <span class="material-symbols-outlined text-[19px] text-on-primary-fixed" style="font-variation-settings:'FILL' 1">check_circle</span>
             </div>
             <div>
@@ -624,7 +624,7 @@
               Felt sore
             </button>
             <button onclick="dismissSorenessPrompt()"
-              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-sm">
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-xs">
               <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_satisfied</span>
               Feeling great!
             </button>
@@ -641,7 +641,7 @@
       <div id="pl-done-soreness-prompt" class="hidden w-full max-w-sm">
         <div class="frosted-glass-card rounded-[22px] p-3.5">
           <div class="flex items-center gap-2.5 mb-3">
-            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-sm shrink-0">
+            <div class="w-9 h-9 rounded-xl bg-primary-fixed flex items-center justify-center shadow-xs shrink-0">
               <span class="material-symbols-outlined text-[19px] text-on-primary-fixed" style="font-variation-settings:'FILL' 1">check_circle</span>
             </div>
             <div>
@@ -656,7 +656,7 @@
               Felt sore
             </button>
             <button onclick="dismissSorenessPrompt()"
-              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-sm">
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-primary-fixed text-on-primary-fixed font-bold text-[12px] hover:brightness-105 active:scale-95 transition-all shadow-xs">
               <span class="material-symbols-outlined text-[16px]" style="font-variation-settings:'FILL' 1">sentiment_very_satisfied</span>
               Feeling great!
             </button>
@@ -691,7 +691,7 @@
           </div>
           <span class="font-label-sm text-label-sm text-on-surface-variant">Coach AI</span>
         </div>
-        <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-sm p-md">
+        <div class="bg-surface-container-lowest ambient-shadow rounded-2xl rounded-tl-xs p-md">
           <p class="font-body-md text-body-md text-on-surface-variant">Ask me about your recovery — I'll answer using reviewed information only. Any exercise I mention still comes from your reviewed list; I won't invent one.</p>
         </div>
       </div>
@@ -702,9 +702,9 @@
     <div class="max-w-md mx-auto px-container-margin py-sm flex items-end gap-sm">
       <textarea id="c-input" rows="1" placeholder="Describe what you're feeling…"
         onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendChat();}"
-        class="flex-1 resize-none rounded-2xl px-md py-sm bg-surface-container-low font-body-md text-body-md text-on-surface outline-none"></textarea>
+        class="flex-1 resize-none rounded-2xl px-md py-sm bg-surface-container-low font-body-md text-body-md text-on-surface outline-hidden"></textarea>
       <button id="c-send" onclick="sendChat()"
-        class="w-11 h-11 flex-shrink-0 rounded-full bg-primary text-on-primary flex items-center justify-center active:scale-90 duration-200 disabled:opacity-40">
+        class="w-11 h-11 shrink-0 rounded-full bg-primary text-on-primary flex items-center justify-center active:scale-90 duration-200 disabled:opacity-40">
         <span class="material-symbols-outlined">arrow_upward</span>
       </button>
     </div>
@@ -718,7 +718,7 @@
     <p class="font-body-md text-body-md text-on-surface-variant mt-1 mb-sm">Reference demonstrations, not tied to your plan.</p>
     <input id="vb-search" type="text" placeholder="Search by name, body part, or equipment…"
       oninput="renderExerciseBrowse()"
-      class="w-full rounded-full px-md py-sm bg-surface-container-low font-body-md text-body-md text-on-surface outline-none mb-md">
+      class="w-full rounded-full px-md py-sm bg-surface-container-low font-body-md text-body-md text-on-surface outline-hidden mb-md">
     <div id="vb-grid" class="flex flex-col gap-lg mb-xl"></div>
 
     <!-- YouTube-curated "Video Library" removed for now (product decision,
@@ -733,7 +733,7 @@
 <section id="s-activity-history" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-lg">
-      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <h2 class="font-headline-md text-headline-md text-on-background">Activity Log History</h2>
@@ -746,7 +746,7 @@
 <section id="s-target-history" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-md">
-      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <div>
@@ -774,7 +774,7 @@
 <section id="s-profile" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-lg">
-      <button onclick="go('home')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('home')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <div>
@@ -797,7 +797,7 @@
 <section id="s-gps" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-lg">
-      <button onclick="closeGpsTracker()" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="closeGpsTracker()" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <div>
@@ -849,7 +849,7 @@
 <section id="s-relationships" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-lg">
-      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('profile')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <div class="flex-1">
@@ -868,7 +868,7 @@
 <section id="s-relationship-detail" class="screen">
   <div class="max-w-md mx-auto px-container-margin pt-lg pb-xl">
     <div class="flex items-center gap-sm mb-lg">
-      <button onclick="go('relationships')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80 shadow-xs">
+      <button onclick="go('relationships')" aria-label="Back" class="w-9 h-9 flex items-center justify-center rounded-full bg-white/70 hover:bg-white/90 text-on-background border border-white/80">
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <div class="flex-1">
@@ -886,36 +886,36 @@
 <!-- ════════ REVOKE / DELETE PLAN CONFIRMATION MODAL ════════ -->
 <!-- In-app replacement for the browser's confirm() box; opened by appConfirm() in main.js.
      Above every other popup (z-[300]) so it can be asked from inside any of them. -->
-<div id="app-confirm-modal" class="fixed inset-0 z-[300] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="app-confirm-modal" class="fixed inset-0 z-300 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeAppConfirm(false)" role="dialog" aria-modal="true" aria-labelledby="app-confirm-msg">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
     <h3 id="app-confirm-title" class="hidden font-headline-sm text-headline-sm text-on-surface font-bold"></h3>
     <p id="app-confirm-msg" class="font-body-md text-body-md text-on-surface whitespace-pre-line"></p>
     <div class="flex items-center justify-end gap-sm mt-sm">
       <button type="button" id="app-confirm-cancel" onclick="closeAppConfirm(false)" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">Cancel</button>
-      <button type="button" id="app-confirm-ok" onclick="closeAppConfirm(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-sm hover:opacity-95 active:scale-95 transition-all">OK</button>
+      <button type="button" id="app-confirm-ok" onclick="closeAppConfirm(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-xs hover:opacity-95 active:scale-95 transition-all">OK</button>
     </div>
   </div>
 </div>
 
 <!-- In-app replacement for the browser's prompt() box where the typed text must be hidden
      (delete account asks for the password); opened by appPrompt() in main.js. -->
-<div id="app-prompt-modal" class="fixed inset-0 z-[300] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="app-prompt-modal" class="fixed inset-0 z-300 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeAppPrompt(false)" role="dialog" aria-modal="true" aria-labelledby="app-prompt-msg">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
     <h3 id="app-prompt-title" class="hidden font-headline-sm text-headline-sm text-on-surface font-bold"></h3>
     <p id="app-prompt-msg" class="font-body-md text-body-md text-on-surface whitespace-pre-line"></p>
     <input id="app-prompt-input" type="password" autocomplete="current-password"
       onkeydown="if (event.key === 'Enter') { event.preventDefault(); closeAppPrompt(true); }"
-      class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+      class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
     <div class="flex items-center justify-end gap-sm mt-sm">
       <button type="button" id="app-prompt-cancel" onclick="closeAppPrompt(false)" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">Cancel</button>
-      <button type="button" id="app-prompt-ok" onclick="closeAppPrompt(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-sm hover:opacity-95 active:scale-95 transition-all">OK</button>
+      <button type="button" id="app-prompt-ok" onclick="closeAppPrompt(true)" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-primary text-on-primary shadow-xs hover:opacity-95 active:scale-95 transition-all">OK</button>
     </div>
   </div>
 </div>
 
-<div id="revoke-rel-modal" class="fixed inset-0 z-[120] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="revoke-rel-modal" class="fixed inset-0 z-120 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeRevokeModal()">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-sm p-lg flex flex-col gap-md">
     <div class="flex items-start gap-md">
@@ -929,11 +929,21 @@
         </p>
       </div>
     </div>
+    <!-- Only shown when revoking an active plan. Off by default: a normal revoke leaves the person signed in on their own phone. -->
+    <div id="revoke-signout-wrap" class="hidden">
+      <label class="flex items-start gap-sm cursor-pointer rounded-xl bg-surface-container-low p-md">
+        <input id="revoke-signout" type="checkbox" class="mt-1 w-5 h-5 shrink-0" aria-describedby="revoke-signout-help">
+        <span class="min-w-0">
+          <span class="block font-label-bold text-label-bold text-on-surface">Also sign them out everywhere</span>
+          <span id="revoke-signout-help" class="block text-[12px] text-secondary mt-0.5">Use this if the link may have leaked. They'll be signed out on every device and can't get back in. Their history stays saved, but nobody can open it.</span>
+        </span>
+      </label>
+    </div>
     <div class="flex items-center justify-end gap-sm mt-sm">
       <button type="button" onclick="closeRevokeModal()" class="px-md py-2 rounded-full font-label-bold text-label-bold text-secondary hover:bg-black/5 active:scale-95 transition-all">
         Cancel
       </button>
-      <button type="button" id="revoke-modal-confirm-btn" onclick="executeRevokeRelationship()" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-error text-white shadow-sm hover:opacity-95 active:scale-95 transition-all">
+      <button type="button" id="revoke-modal-confirm-btn" onclick="executeRevokeRelationship()" class="px-lg py-2 rounded-full font-label-bold text-label-bold bg-error text-white shadow-xs hover:opacity-95 active:scale-95 transition-all">
         Revoke Plan
       </button>
     </div>
@@ -941,7 +951,7 @@
 </div>
 
 <!-- Create-invite modal: pick who this plan is for, get the link back. -->
-<div id="invite-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="invite-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeCreateInviteModal()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md p-lg flex flex-col gap-md">
     <div class="flex items-center justify-between">
@@ -953,7 +963,7 @@
     <div>
       <label class="font-label-bold text-label-bold text-on-surface">Their name</label>
       <input id="invite-name" type="text" placeholder="e.g. Priya"
-        class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+        class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
     </div>
     <div class="grid grid-cols-2 gap-sm">
       <button onclick="createRelationshipInvite('child')" class="bg-surface-container-low hover:bg-surface-variant rounded-lg py-md flex flex-col items-center gap-xs font-label-bold text-label-bold text-on-surface">
@@ -975,7 +985,7 @@
 <!-- Add-activity modal, manager side: plain taxonomy list (no personalized
      tier/catalogue for a managed user yet) + sets/amount + the auto-progress
      toggle this whole feature is built around. -->
-<div id="managed-add-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="managed-add-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeManagedAddModal()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1076,7 +1086,7 @@
 <div id="toast" class="toast"></div>
 
 <!-- ════════ EXERCISE DEMO MODAL (first-layer overlay) ════════ -->
-<div id="demo-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="demo-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeDemo()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1096,7 +1106,7 @@
 </div>
 
 <!-- ════════ EDIT PROFILE MODAL (first-layer overlay) — age/goal/experience/conditions, one form ════════ -->
-<div id="cond-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="cond-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeProfileEditor()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1110,7 +1120,7 @@
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Age</label>
         <input id="pm-age" type="number" min="1"
-          class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
       </div>
       <div class="flex flex-col gap-sm">
         <label class="font-label-bold text-label-bold text-on-surface">Primary Goal</label>
@@ -1134,7 +1144,7 @@
 </div>
 
 <!-- ════════ FORGOT PASSWORD MODAL (first-layer overlay) ════════ -->
-<div id="forgot-pw-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="forgot-pw-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeForgotPasswordModal()">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-md overflow-hidden flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1158,7 +1168,7 @@
       <div>
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Email Address</label>
         <input id="fp-email" type="email" placeholder="you@example.com" autocomplete="email"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
       </div>
 
       <div id="fp-err" class="hidden rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs"></div>
@@ -1177,7 +1187,7 @@
 </div>
 
 <!-- ════════ CHANGE PASSWORD MODAL (first-layer overlay) ════════ -->
-<div id="pw-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="pw-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closePasswordEditor()">
   <div class="bg-surface-container-lowest rounded-2xl ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1192,7 +1202,7 @@
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Current Password</label>
         <div class="relative mt-xs">
           <input id="pw-current" type="password" autocomplete="current-password" placeholder="Enter current password"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('pw-current', 'pw-current-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="pw-current-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -1201,7 +1211,7 @@
       <div id="pw-reset-wrap" class="hidden">
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Reset Code</label>
         <input id="pw-reset-code" type="text" autocomplete="one-time-code" placeholder="Paste reset code"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
         <p class="font-label-sm text-[11px] text-on-surface-variant mt-1">Sent to your email from ayush.kumar@vitainspire.com.</p>
       </div>
       <div>
@@ -1209,7 +1219,7 @@
         <div class="relative mt-xs">
           <input id="pw-new" type="password" autocomplete="new-password" placeholder="Enter new password"
             oninput="checkPasswordRules('pw-new', 'pw-confirm', 'p')"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('pw-new', 'pw-new-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="pw-new-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -1220,7 +1230,7 @@
         <div class="relative mt-xs">
           <input id="pw-confirm" type="password" autocomplete="new-password" placeholder="Type new password again"
             oninput="checkPasswordRules('pw-new', 'pw-confirm', 'p')"
-            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+            class="w-full bg-surface-container-low border-none rounded-lg px-md py-sm pr-11 font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
           <button type="button" onclick="togglePasswordVisibility('pw-confirm', 'pw-confirm-eye')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface p-1" aria-label="Toggle password visibility">
             <span id="pw-confirm-eye" class="material-symbols-outlined text-lg">visibility</span>
           </button>
@@ -1275,7 +1285,7 @@
      and Your Own custom exercises (bottom, tracking-only - 4.4). Saving in
      the bottom section never calls the Program endpoint; the two paths
      stay fully separate even though they now share one entry point. -->
-<div id="catalogue-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="catalogue-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeCatalogue()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] overflow-y-auto flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 sticky top-0 bg-surface-container-lowest z-10">
@@ -1300,7 +1310,7 @@
       <div class="border-t border-outline-variant/30 pt-md">
         <label class="font-label-bold text-label-bold text-on-surface">Add a New One</label>
         <input id="custom-name" type="text" placeholder="e.g. Swimming"
-          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-none">
+          class="w-full mt-xs bg-surface-container-low border-none rounded-lg px-md py-sm font-body-md text-body-md focus:ring-2 focus:ring-primary-fixed focus:outline-hidden">
       </div>
 
       <div id="custom-type-wrap">
@@ -1332,7 +1342,7 @@
 <!-- ════════ ADD-EXERCISE TARGET POPUP (self-service) — same sets/amount +
      auto-upgrade choice the managed-add modal already gives a manager, now
      for a user adding to their own plan from the catalogue above. ════════ -->
-<div id="catalogue-add-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="catalogue-add-modal" class="fixed inset-0 z-110 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closeCatalogueAddEditor()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 shrink-0">
@@ -1372,7 +1382,7 @@
 
 <!-- ════════ PLAYER EDIT-TARGET POPUP — replaces native window.prompt()
      dialogs for the pencil/Edit button in the Workout Player header. ════════ -->
-<div id="pl-edit-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="pl-edit-modal" class="fixed inset-0 z-110 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) closePlayerEditModal()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md max-h-[85vh] flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30 shrink-0">
@@ -1415,7 +1425,7 @@
 <!-- ════════ GPS: NO SIGNAL / NO MOVEMENT RECORDED — replaces the native
      prompt() asking for a manual distance when standalone GPS tracking
      (not linked to the Workout Player) recorded 0.00 km. ════════ -->
-<div id="gps-manual-modal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/60 backdrop-blur-sm px-container-margin"
+<div id="gps-manual-modal" class="fixed inset-0 z-110 hidden items-center justify-center bg-black/60 backdrop-blur-xs px-container-margin"
      onclick="if (event.target === this) discardGpsManualDistance()">
   <div class="bg-surface-container-lowest rounded-lg ambient-shadow w-full max-w-md flex flex-col">
     <div class="flex items-center justify-between px-md py-sm border-b border-outline-variant/30">
@@ -1439,8 +1449,8 @@
 </div>
 
 <!-- ════════ VOICE LOGGING MODAL ════════ -->
-<div id="voice-modal" class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/80 backdrop-blur-md px-container-margin transition-opacity">
-  <div class="bg-surface-container-lowest rounded-[32px] ambient-shadow w-full max-w-md flex flex-col p-lg relative overflow-hidden">
+<div id="voice-modal" class="fixed inset-0 z-100 hidden items-center justify-center bg-black/80 backdrop-blur-md px-container-margin transition-opacity">
+  <div class="bg-surface-container-lowest rounded-[32px] ambient-shadow w-full max-w-md max-h-[90vh] flex flex-col p-lg relative overflow-hidden">
     <button onclick="cancelVoiceLog()" aria-label="Close" class="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-black/5 hover:bg-black/10 text-on-surface-variant z-10 transition-colors">
       <span class="material-symbols-outlined text-[20px]">close</span>
     </button>
@@ -1454,6 +1464,9 @@
       <h3 id="voice-modal-title" class="font-headline-sm text-headline-sm text-on-surface font-bold text-center">Listening...</h3>
     </div>
     
+    <!-- Only this middle part scrolls (reply, transcript, tiles, fallback message); the avatar/title above
+         and the Done / Speak Again / Confirm buttons below stay in view however many tiles there are. -->
+    <div id="voice-scroll" class="flex-1 min-h-0 overflow-y-auto overscroll-contain">
     <p id="voice-ai-reply" class="font-body-md text-on-surface bg-primary-container p-3 rounded-xl mb-md hidden"></p>
     <p id="voice-raw-transcript" class="font-body-md text-on-surface-variant italic bg-surface-container-low p-2 rounded-lg mb-md hidden"></p>
     <p id="voice-speed-stats" class="text-[10px] font-mono font-bold text-primary mb-md hidden"></p>
@@ -1467,13 +1480,15 @@
       <p id="voice-fallback-msg" class="font-body-md text-body-md text-on-surface text-center">We couldn't hear you. Please try again or log manually in the workout player.</p>
     </div>
 
+    </div>
+
     <!-- Shown only while actively recording — manual stop control, since
          auto-stop-on-silence (VAD) was removed as unreliable (found live:
          repeatedly cut users off mid-sentence or never stopped at all,
          depending on the mic/room's noise floor). Clicking the mic FAB again
          does the same thing; this is just a clearer, more discoverable
          control for the same action. -->
-    <button id="voice-done-btn" onclick="toggleWhisperRecording()" class="hidden w-full bg-primary text-on-primary py-3 rounded-full font-label-bold text-label-bold hover:opacity-90 transition-opacity shadow-sm mt-auto">
+    <button id="voice-done-btn" onclick="toggleWhisperRecording()" class="hidden w-full bg-primary text-on-primary py-3 rounded-full font-label-bold text-label-bold hover:opacity-90 transition-opacity shadow-xs mt-auto">
       Done — Finish Recording
     </button>
 
@@ -1481,7 +1496,7 @@
       <button id="voice-edit-btn" onclick="editVoiceLog()" class="flex-1 bg-surface-container-high text-on-surface py-3 rounded-full font-label-bold text-label-bold hover:bg-surface-container-highest transition-colors border border-black/5">
         Speak Again
       </button>
-      <button id="voice-confirm-btn" onclick="confirmVoiceLog()" class="flex-1 bg-primary text-on-primary py-3 rounded-full font-label-bold text-label-bold hover:opacity-90 transition-opacity shadow-sm">
+      <button id="voice-confirm-btn" onclick="confirmVoiceLog()" class="flex-1 bg-primary text-on-primary py-3 rounded-full font-label-bold text-label-bold hover:opacity-90 transition-opacity shadow-xs">
         Confirm
       </button>
     </div>

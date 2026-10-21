@@ -161,6 +161,15 @@ auto_progress                boolean not null default true
 
 ### 3.4 The invite link
 
+> **Current behaviour (supersedes the design below).** The shipped flow differs from the
+> "sign up, then claim" design described in this section: the person never signs up or logs in.
+> `POST /v1/relationships/open` (no auth; the invite token is the credential) creates the managed
+> account silently the first time and returns a normal token pair. The link is **NOT single-use**:
+> it has no expiry and can be opened again, from any device, at any time, until the manager revokes it.
+> Treat it like a password for that person's data — the app shows the manager a warning when the link
+> is copied. Revoking is the only thing that cuts access off.
+
+
 A manager action ("add a student/patient/child") generates one row in
 `managed_relationships` with `status='pending'`, `managed_user_id=null`, and a
 random `invite_token`. The link is `https://app.example.com/invite/<token>`.
@@ -216,6 +225,14 @@ New/changed endpoints:
   `status='revoked'`, `revoked_at=now()`). Does **not** delete the managed
   user's `UserProgram` entries, history, or touch `auto_progress`/targets at
   all — see §5.1 for exactly what this means with a worked example.
+  By default the person's own session also keeps working. Passing
+  `?sign_out=true` (the "Also sign them out everywhere" checkbox in the revoke
+  dialog, off by default) additionally revokes that one account's refresh tokens
+  and live access tokens, for the case where the link may have leaked. Only that
+  account is affected, never the manager's. The response is
+  `{"status": "revoked", "signed_out": true|false}`. Signing someone out is
+  permanent in practice: the account has no usable password or email, so with
+  the link revoked nobody can open it again (the history stays stored).
 - `POST /v1/program/entries` (existing route, `app/profile/routes.py:206`) —
   extended to accept an optional `managed_user_id` + `auto_progress`; the
   service layer checks for an `active` `managed_relationships` row before

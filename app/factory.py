@@ -68,6 +68,10 @@ def create_app() -> Flask:
         response.headers["X-Request-Id"] = getattr(g, "request_id", "")
         # Browsers must not guess a different content type than the one we send.
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        # This server returns JSON, images and local dev pages — never anything meant to be
+        # framed by another site, and it has no use for the Referer of whoever linked here.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
         # Private (logged-in) responses must not be stored by a browser or proxy cache.
         # Public reference lists carry no token and stay cacheable; a route that already
         # set its own Cache-Control (the voice audio) keeps it.

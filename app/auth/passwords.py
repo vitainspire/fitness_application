@@ -6,6 +6,8 @@ rules — no mandated symbol classes.
 from __future__ import annotations
 
 import hashlib
+import logging
+import threading
 
 import requests
 from argon2 import PasswordHasher
@@ -13,9 +15,33 @@ from argon2.exceptions import InvalidHashError, VerificationError
 
 from app.platform.errors import ValidationError
 
+log = logging.getLogger(__name__)
+
 _hasher = PasswordHasher()
 
+# Each Argon2 hash needs ~64 MiB of memory and a full CPU for a second or more. On a small
+# instance (Render's free tier has 512 MB), a burst of simultaneous logins/signups could
+# exhaust memory and get the worker killed — seen as sporadic 502/503 under bursts. At most
+# this many hashes run at once per worker process; the rest simply wait their turn. The
+# hashing cost itself is NOT changed, so password security is exactly as before.
+_HASH_SLOTS = threading.BoundedSemaphore(2)
+
 _PWNED_RANGE_URL = "https://api.pwnedpasswords.com/range/{prefix}"
+
+# Safety net for when the live breach lookup can't be reached (see is_breached). Lower-case,
+# compared case-insensitively. Only passwords that pass the length/complexity rules matter
+# here, so these are the well-known "complex-looking" favourites. It is deliberately small:
+# it never replaces the live check, and it is not consulted when that check works.
+_OFFLINE_COMMON_PASSWORDS = frozenset({
+    "password123!", "password1234!", "password@123", "password#123", "password@1234",
+    "p@ssw0rd123", "p@ssword123", "p@ssw0rd@123", "passw0rd123!", "welcome123!",
+    "welcome@123", "welcome@1234", "qwerty123!", "qwerty@123", "qwertyuiop1!",
+    "admin@12345", "admin@123456", "admin123456!", "letmein123!", "iloveyou123!",
+    "iloveyou@123", "changeme123!", "abc123456!", "abcd@123456", "india@12345",
+    "india@123456", "monkey123!", "dragon123!", "football123!", "baseball123!",
+    "sunshine123!", "princess123!", "superman123!", "master@12345", "test@123456",
+    "user@123456", "123456789a!", "1qaz2wsx3edc!", "q1w2e3r4t5!", "asdfghjkl123!",
+})
 
 # Found live (pre-launch production readiness check): nothing capped how long
 # a submitted password could be, on either the set-a-new-password path
@@ -42,7 +68,8 @@ DUMMY_PASSWORD_HASH = _hasher.hash("not-a-real-password-timing-safety-constant")
 
 
 def hash_password(plain: str) -> str:
-    return _hasher.hash(plain)
+    with _HASH_SLOTS:
+        return _hasher.hash(plain)
 
 
 def verify_password(stored_hash: str, plain: str) -> bool:
@@ -51,7 +78,8 @@ def verify_password(stored_hash: str, plain: str) -> bool:
         # MAX_PASSWORD_LENGTH's own comment above.
         return False
     try:
-        return _hasher.verify(stored_hash, plain)
+        with _HASH_SLOTS:
+            return _hasher.verify(stored_hash, plain)
     except (VerificationError, InvalidHashError):
         # VerificationError is the base class (VerifyMismatchError is one
         # subclass of it) — found live, code audit: the narrower except only
@@ -80,7 +108,10 @@ def is_breached(plain: str, *, timeout: float = 2.0) -> bool:
         resp = requests.get(_PWNED_RANGE_URL.format(prefix=prefix), timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException:
-        return False
+        # Live lookup unavailable: still refuse the most common passwords from the
+        # built-in list below instead of accepting everything.
+        log.warning("breach check unavailable; falling back to the built-in common-password list")
+        return plain.lower() in _OFFLINE_COMMON_PASSWORDS
     return any(line.split(":")[0] == suffix for line in resp.text.splitlines())
 
 
