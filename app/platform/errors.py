@@ -67,6 +67,14 @@ def register_error_handlers(app: Flask) -> None:
         body = {"error": {"code": exc.code, "message": exc.message}}
         response = jsonify(body)
         response.status_code = exc.status
+        if exc.status >= 500:
+            # e.g. a 502 from the voice proxy when the provider rejects our key: not a
+            # crash, but still something a person should hear about.
+            try:
+                from app.platform import alerts
+                alerts.notify_exception(exc, status=exc.status)
+            except Exception:
+                pass
         if exc.retry_after is not None:
             response.headers["Retry-After"] = str(exc.retry_after)
         return response
@@ -123,6 +131,14 @@ def register_error_handlers(app: Flask) -> None:
                     )
             except Exception:
                 app.logger.exception("Failed to record the above exception as an issue")
+        # Tell Slack (off unless configured). notify_exception only queues a small
+        # summary for a background thread and never raises, so it cannot change the
+        # response below; the extra try/except guards even the import.
+        try:
+            from app.platform import alerts
+            alerts.notify_exception(exc, status=500)
+        except Exception:
+            app.logger.warning("alerts hook failed", exc_info=True)
         # Never leak internals to a mobile client.
         return jsonify({
             "error": {"code": "internal_error", "message": "Something went wrong"}
