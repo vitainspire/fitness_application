@@ -153,6 +153,23 @@ class Config:
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
 
+    # --- Slack error alerts (app/platform/alerts.py) ------------------------
+    # Off unless SLACK_ALERTS_ENABLED=true AND SLACK_WEBHOOK_URL is set, so a
+    # deploy that forgets either simply sends nothing. The webhook URL is a
+    # secret (anyone holding it can post to the channel): set it only as an
+    # environment variable, never in code or chat.
+    slack_webhook_url: str = ""
+    slack_alerts_enabled: bool = False
+    # Ask an AI model to explain the likely cause in plain words (see alerts.py).
+    alert_cause_analysis_enabled: bool = True
+    alert_cause_model: str = "openai/gpt-4.1-mini"
+    # The same error is announced at most once per window, with a count of repeats.
+    alert_dedup_seconds: int = 900
+    # Hard ceiling on Slack messages per hour from one server process.
+    alert_max_per_hour: int = 20
+    # Short git commit shown in the alert so you know which deploy failed.
+    app_version: str = ""
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"
@@ -321,6 +338,13 @@ def load_config() -> Config:
         smtp_password=_optional("SMTP_PASSWORD", ""),
         smtp_use_tls=_optional("SMTP_USE_TLS", "true").lower() == "true",
         smtp_use_ssl=_optional("SMTP_USE_SSL", "false").lower() == "true",
+        slack_webhook_url=_optional("SLACK_WEBHOOK_URL", ""),
+        slack_alerts_enabled=_optional("SLACK_ALERTS_ENABLED", "false").lower() == "true",
+        alert_cause_analysis_enabled=_optional("ALERT_CAUSE_ANALYSIS_ENABLED", "true").lower() == "true",
+        alert_cause_model=_optional("ALERT_CAUSE_MODEL", "openai/gpt-4.1-mini"),
+        alert_dedup_seconds=_int("ALERT_DEDUP_SECONDS", 900),
+        alert_max_per_hour=_int("ALERT_MAX_PER_HOUR", 20),
+        app_version=_optional("RENDER_GIT_COMMIT", "")[:7],
     )
 
 
