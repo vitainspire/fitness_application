@@ -168,6 +168,8 @@ def create_app() -> Flask:
         return jsonify({
             "minimum_supported_version": os.environ.get("MIN_APP_VERSION", "1.0.0"),
             "soft_update_version": os.environ.get("SOFT_UPDATE_VERSION", "1.0.0"),
+            # Public by design (an OAuth client id is not a secret). Empty = hide the Google button.
+            "google_client_id": app.config["APP_CONFIG"].google_client_id,
         })
 
     return app

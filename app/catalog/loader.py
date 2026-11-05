@@ -19,7 +19,7 @@ from pathlib import Path
 from sqlalchemy import delete, select
 
 from app.catalog.models import (
-    ActivityTaxonomy, Condition, ConditionInteractionCell, SafetyGridCell, VideoCatalog,
+    ActivityTaxonomy, Condition, ConditionCombinationCell, ConditionInteractionCell, SafetyGridCell, VideoCatalog,
 )
 from app.platform.config import load_config
 from app.platform.db import init_engine, session_scope
@@ -330,6 +330,54 @@ def load_condition_interactions(session) -> int:
     return len(rows)
 
 
+COMBINATIONS_FILE = "condition_combinations_794_AUDITED.csv"
+COMBINATION_ACTIVITY_COLUMNS = (
+    "walk", "glute_bridge", "dead_bug", "shoulder_circles", "running", "ankle_circles", "wrist_circles",
+    "calf_stretch", "hamstring_stretch", "quad_stretch", "neck_isometric", "lower_back_side_stretch",
+)
+
+
+def load_condition_combinations(session) -> int:
+    """The audited 794-combination table -> `condition_combinations` (one row per exact condition SET x activity).
+
+    Fail-closed like the grid: a missing/unknown verdict, an unknown condition name, an unknown activity, or a duplicate set refuses the load
+    instead of leaving a half-filled table where an absent row would read as "nothing to block". Returns the number of condition sets loaded.
+    """
+    path = DATA / COMBINATIONS_FILE
+    if not path.exists():
+        raise CoverageError(f"{COMBINATIONS_FILE} is missing — the app would block nothing for combinations of conditions.")
+    names = {c.display_name: c.condition_code for c in session.scalars(select(Condition)).all()}
+    activities = set(session.scalars(select(ActivityTaxonomy.activity_type)).all())
+    rows = list(csv.DictReader(path.open(encoding="utf-8-sig", newline="")))
+    if not rows:
+        raise CoverageError(f"{COMBINATIONS_FILE} has no rows.")
+    unknown_cols = [a for a in COMBINATION_ACTIVITY_COLUMNS if a not in activities]
+    if unknown_cols:
+        raise CoverageError(f"{COMBINATIONS_FILE}: unknown activity column(s) {unknown_cols}.")
+
+    session.execute(delete(ConditionCombinationCell))
+    seen: set[str] = set()
+    for r in rows:
+        codes = []
+        for k in ("condition_1", "condition_2", "condition_3", "condition_4"):
+            name = (r.get(k) or "").strip()
+            if name and name != "None":
+                if name not in names:
+                    raise CoverageError(f"{COMBINATIONS_FILE}: unknown condition name {name!r}.")
+                codes.append(names[name])
+        key = "|".join(sorted(codes))
+        if len(set(codes)) != len(codes) or key in seen:
+            raise CoverageError(f"{COMBINATIONS_FILE}: duplicate condition set {key or '(none)'!r}.")
+        seen.add(key)
+        for a in COMBINATION_ACTIVITY_COLUMNS:
+            verdict = (r.get(a) or "").strip()
+            if verdict not in ("safe", "modify", "avoid"):
+                raise CoverageError(f"{COMBINATIONS_FILE}: verdict for {key or '(none)'} x {a} must be safe/modify/avoid, got {verdict!r}.")
+            session.add(ConditionCombinationCell(condition_set=key, activity_type=a, condition_count=len(codes), verdict=verdict))
+    session.flush()
+    return len(rows)
+
+
 def seed_videos(session) -> int:
     """Create one catalogue row per activity, awaiting curation.
 
@@ -371,6 +419,7 @@ def main() -> int:
             g = load_safety_grid(s)
             assert_full_coverage(s)
             i = load_condition_interactions(s)
+            cc = load_condition_combinations(s)
             v = seed_videos(s)
     except CoverageError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -380,6 +429,7 @@ def main() -> int:
     print(f"activities   {t:4}")
     print(f"grid cells   {g:4}  (coverage complete)")
     print(f"interactions {i:4}  (sparse, escalation-only)")
+    print(f"combinations {cc:4}  (audited condition sets, block-only)")
     print(f"video links  {v:4}  (placeholder search links)")
     return 0
 

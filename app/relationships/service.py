@@ -107,6 +107,9 @@ def blocked_activities_for_codes(session: Session, condition_codes: list[str] | 
         ).all()
         for activity_type, note in rows:
             out.setdefault(activity_type, note)
+    from app.profile.service import COMBINATION_BLOCK_NOTE, combination_avoid_for_codes   # local: import cycle
+    for activity_type in combination_avoid_for_codes(session, condition_codes):
+        out.setdefault(activity_type, COMBINATION_BLOCK_NOTE)
     return out
 
 

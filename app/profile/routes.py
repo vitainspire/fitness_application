@@ -190,6 +190,10 @@ def update_profile():
     """3.4 — edit age / goal / experience_band / unit_preference in any
     combination, without resubmitting conditions or rebuilding the program."""
     d = _body()
+    # Found live (Gemini V9 audit): condition_codes sent here used to be ignored while the reply said 200,
+    # so a tester read it as "saved". Condition changes need the full safety re-check, which only onboarding does.
+    if "condition_codes" in d:
+        raise ValidationError("Health conditions can't be changed here. Use POST /v1/profile/onboarding, which re-checks the exercise safety rules.")
     # Found live (second-pass code audit): this route used to pass raw JSON
     # values straight through as `fields`, and service.update_profile does
     # `if goal not in GOALS` etc. directly on them — a non-string value

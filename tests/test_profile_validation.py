@@ -145,6 +145,18 @@ def test_non_hashable_unit_preference_on_profile_update_returns_422(make_user, c
     assert r.status_code == 422
 
 
+def test_condition_codes_on_profile_update_is_refused_not_silently_ignored(make_user, client):
+    """Found live (Gemini V9 audit): PUT /v1/profile ignored condition_codes and still answered 200, so a tester read it as saved.
+    Conditions only change through onboarding (it re-runs the exercise safety rules), so this route must say so and change nothing."""
+    user = make_user(condition_codes=["arthritis_knee"])
+    r = client.put("/v1/profile", json={"condition_codes": ["arthritis_knee", "herniated_disk"]}, headers=user["headers"])
+    assert r.status_code == 422 and "onboarding" in r.get_json()["error"]["message"]
+    after = client.get("/v1/profile", headers=user["headers"]).get_json()
+    assert [c["code"] for c in after["conditions"]] == ["arthritis_knee"]
+    r = client.put("/v1/profile", json={"goal": "health"}, headers=user["headers"])           # the normal edit still works
+    assert r.status_code == 200
+
+
 def test_age_above_max_on_profile_update_returns_422_not_a_db_overflow(make_user, client):
     """Found live (second-pass audit): only a floor (>=18) was ever checked,
     no ceiling — an extreme age passed the app check and only failed at

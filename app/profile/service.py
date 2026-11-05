@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.catalog.models import (
-    ActivityTaxonomy, Condition, ConditionInteractionCell, SafetyGridCell, VideoCatalog,
+    ActivityTaxonomy, Condition, ConditionCombinationCell, ConditionInteractionCell, SafetyGridCell, VideoCatalog,
 )
 from app.platform.errors import Conflict, Forbidden, NotFound, ValidationError
 from app.profile.models import (
@@ -496,11 +496,32 @@ def _interaction_verdicts(session: Session, user_id: str) -> dict[str, dict]:
     return out
 
 
+COMBINATION_BLOCK_NOTE = "Not recommended for your saved health conditions."
+
+
+def combination_avoid_for_codes(session: Session, condition_codes) -> frozenset[str]:
+    """Activities the AUDITED 794-combination table marks `avoid` for this EXACT set of conditions (the table the chat answers from).
+    Empty when the set has no audited row (a refer-bucket condition, a condition outside the 12, 5+ conditions): the per-condition grid and
+    the pair table still apply then, so this can only ADD a block, never remove one."""
+    key = "|".join(sorted({c for c in condition_codes if c and c != "none"}))
+    return frozenset(session.scalars(
+        select(ConditionCombinationCell.activity_type)
+        .where(ConditionCombinationCell.condition_set == key, ConditionCombinationCell.verdict == "avoid")
+    ).all())
+
+
+@_per_request_cache
+def _combination_avoid(session: Session, user_id: str) -> frozenset[str]:
+    return combination_avoid_for_codes(session, session.scalars(
+        select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all())
+
+
 @_per_request_cache
 def _blocked_activities(session: Session, user_id: str) -> dict[str, str]:
     """activity_type -> note, for anything the grid marks `avoid` — either a
     single condition on its own, or two of the user's conditions together
-    (see _interaction_verdicts)."""
+    (see _interaction_verdicts), or the user's exact condition set in the
+    audited combination table (see _combination_avoid)."""
     rows = session.execute(
         select(SafetyGridCell.activity_type, SafetyGridCell.note)
         .join(UserCondition,
@@ -511,6 +532,8 @@ def _blocked_activities(session: Session, user_id: str) -> dict[str, str]:
     for activity_type, interaction in _interaction_verdicts(session, user_id).items():
         if interaction["verdict"] == "avoid":
             out.setdefault(activity_type, interaction["note"])
+    for activity_type in _combination_avoid(session, user_id):
+        out.setdefault(activity_type, COMBINATION_BLOCK_NOTE)
     return out
 
 
@@ -529,6 +552,8 @@ def _modified_activities(session: Session, user_id: str) -> dict[str, str]:
         # gives these two within a single condition's own cells.
         if interaction["verdict"] == "modify" and activity_type not in blocked:
             out[activity_type] = interaction["note"]
+    for activity_type in _combination_avoid(session, user_id):
+        out.pop(activity_type, None)                  # the audited table says avoid: not a "modify" any more
     return out
 
 
@@ -769,14 +794,30 @@ def _worst_verdict(session: Session, user_id: str, activity_type: str) -> dict |
                 "condition_b_name": interaction["condition_b_name"]}
 
     if pair is None:
-        return single
-    if single is None:
-        return pair
+        result = single
+    elif single is None:
+        result = pair
     # A tie prefers the pair result — it's the more specific, more useful
     # reason to show the user (names both conditions, not just one).
-    if _VERDICT_RANK[pair["verdict"]] >= _VERDICT_RANK[single["verdict"]]:
-        return pair
-    return single
+    elif _VERDICT_RANK[pair["verdict"]] >= _VERDICT_RANK[single["verdict"]]:
+        result = pair
+    else:
+        result = single
+
+    # The audited combination table can only ADD an avoid; a richer single/pair avoid already found above keeps its own wording.
+    if (result is None or result["verdict"] != "avoid") and activity_type in _combination_avoid(session, user_id):
+        codes = sorted(c for c in session.scalars(
+            select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all() if c != "none")
+        names = dict(session.execute(
+            select(Condition.condition_code, Condition.display_name).where(Condition.condition_code.in_(codes))).all())
+        if len(codes) == 1:
+            return {"kind": "single", "condition_code": codes[0], "condition_name": names.get(codes[0], codes[0]),
+                    "verdict": "avoid", "note": COMBINATION_BLOCK_NOTE, "reviewed_at": None}
+        return {"kind": "set", "verdict": "avoid", "note": COMBINATION_BLOCK_NOTE, "reviewed_at": None,
+                "condition_names": [names.get(c, c) for c in codes],
+                "condition_a_code": codes[0], "condition_a_name": names.get(codes[0], codes[0]),
+                "condition_b_code": codes[1], "condition_b_name": names.get(codes[1], codes[1])}
+    return result
 
 
 def _override_warning(condition_name: str) -> str:
@@ -790,6 +831,13 @@ def _override_warning(condition_name: str) -> str:
     return (f"You've told us you have {condition_name}. This exercise isn't recommended "
             "for that condition, so it's blocked by default. Only continue if a doctor "
             "has examined you and specifically advised you to do it.")
+
+
+def _override_warning_set(condition_names: list[str]) -> str:
+    """Same as _override_warning_pair, for a block that comes from the audited table for the user's WHOLE set of conditions (3 or 4 included)."""
+    joined = ", ".join(condition_names[:-1]) + " and " + condition_names[-1]
+    return (f"You've told us you have {joined}. Together, this combination isn't recommended for this exercise. "
+            "Only continue if a doctor has examined you and specifically advised you to do it.")
 
 
 def _override_warning_pair(condition_a_name: str, condition_b_name: str) -> str:
@@ -894,10 +942,12 @@ def add_program_entry(session: Session, user_id: str, activity_type: str,
 
     worst = _worst_verdict(session, user_id, activity_type)
     if worst and worst["verdict"] == "avoid":
-        is_pair = worst["kind"] == "pair"
+        is_set = worst["kind"] == "set"                  # blocked by the audited table for the whole condition set
+        is_pair = worst["kind"] == "pair" or is_set      # both name TWO condition codes in the consent record
         warning_text = (
-            _override_warning_pair(worst["condition_a_name"], worst["condition_b_name"])
-            if is_pair else _override_warning(worst["condition_name"])
+            _override_warning_set(worst["condition_names"]) if is_set
+            else _override_warning_pair(worst["condition_a_name"], worst["condition_b_name"]) if is_pair
+            else _override_warning(worst["condition_name"])
         )
         if not override_confirmed:
             response = {
@@ -935,6 +985,7 @@ def add_program_entry(session: Session, user_id: str, activity_type: str,
         # dashboard regardless of tier from now on (_dashboard_slice).
         existing.status = "active"
         existing.suspended_reason = None
+        existing.switch_undo = None             # a deliberate add by the user: a later "undo my changes" must not pause it
         existing.source = source
         # A re-add is a fresh start for "logged today" purposes (matches how
         # deleting+recreating a custom exercise gets a fresh id): any log from
@@ -1159,11 +1210,12 @@ def remove_program_entry(session: Session, user_id: str, activity_type: str) -> 
     if row is not None:
         row.status = "suspended"
         row.suspended_reason = "user_removed"
+        row.switch_undo = None                  # the user's own choice now: a later "undo my changes" must not touch it
     session.flush()
     return {"removed": True, "program": get_program(session, user_id)}
 
 
-def set_program_to_activities(session: Session, user_id: str, activity_types: list[str]) -> dict:
+def set_program_to_activities(session: Session, user_id: str, activity_types: list[str], hide_others: bool = True) -> dict:
     """Drives the chat's "add these suggested exercises to your program?"
     confirmation (found live: a user asked the rehab chatbot for
     sport-specific exercises and wanted a one-tap way to actually put them in
@@ -1214,6 +1266,7 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
                 user_id=user_id, activity_type=activity_type,
                 target_sets=taxonomy.default_sets, target_amount=taxonomy.default_amount,
                 unit=taxonomy.amount_unit, source="template",
+                switch_undo="new" if hide_others else None,        # a Switch (not Add) records what it changed so "undo my changes" can reverse it
             ))
             added.append(activity_type)
         elif entry.status == "active":
@@ -1222,11 +1275,15 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
             # Was hidden (any prior reason) — the user just explicitly asked
             # for it back, so restore it with whatever it already had rather
             # than resetting to a fresh baseline.
+            # A Switch remembers the earlier state (the FIRST one is kept, so a chain of switches undoes back to the original plan). An entry a
+            # previous switch only paused (sport_focus_change) needs no marker: Undo already brings that kind back.
+            if hide_others and entry.switch_undo is None and entry.suspended_reason != "sport_focus_change":
+                entry.switch_undo = f"suspended:{entry.suspended_reason or ''}"
             entry.status = "active"
             entry.suspended_reason = None
             already_active.append(activity_type)
 
-    for activity_type, entry in existing.items():
+    for activity_type, entry in (existing.items() if hide_others else ()):      # hide_others=False is the chat's ADD mode: nothing else is paused
         if (
             activity_type not in wanted
             and entry.status == "active"
@@ -1263,6 +1320,42 @@ def restore_program_activities(session: Session, user_id: str, activity_types: l
             restored.append(activity_type)
     session.flush()
     return {"restored": restored, "program": get_program(session, user_id)}
+
+
+def switch_added_activity_types(session: Session, user_id: str) -> list[str]:
+    """The exercises a chat "Switch" put into this user's plan and that are still in that switched state: active, or paused by a later
+    switch. (One the user has since removed or re-added themselves lost its marker; one a condition change paused is left alone.)"""
+    return list(session.scalars(
+        select(UserProgram.activity_type).where(
+            UserProgram.user_id == user_id,
+            UserProgram.switch_undo.is_not(None),
+            or_(UserProgram.status == "active",
+                (UserProgram.status == "suspended") & (UserProgram.suspended_reason == "sport_focus_change")),
+        )
+    ).all())
+
+
+def undo_switch_additions(session: Session, user_id: str, activity_types: list[str]) -> dict:
+    """Part of "undo my changes": puts the entries a Switch put into the plan back to what they were before it. An exercise the user had
+    removed is removed again; one that did not exist is paused (never deleted, so any target already built up is kept). Re-checks that each
+    one is still in the switched state, and clears the markers of the whole earlier switch so a second undo has nothing left to reverse."""
+    if is_referred(session, user_id):
+        raise Forbidden("Speak to a doctor before changing your program.")
+    allowed = set(switch_added_activity_types(session, user_id))
+    undone = []
+    for activity_type in activity_types:
+        entry = session.get(UserProgram, (user_id, activity_type))
+        if entry is None or activity_type not in allowed:
+            continue
+        prior = entry.switch_undo or ""
+        reason = prior[len("suspended:"):] if prior.startswith("suspended:") else ""
+        entry.status = "suspended"
+        entry.suspended_reason = reason or "switch_undone"
+        undone.append(activity_type)
+    # whatever else still carries a marker belongs to a switch that is now over (or was changed by the user since): stop tracking it
+    session.execute(update(UserProgram).where(UserProgram.user_id == user_id, UserProgram.switch_undo.is_not(None)).values(switch_undo=None))
+    session.flush()
+    return {"undone": undone, "program": get_program(session, user_id)}
 
 
 def _tier_slice(items_by_priority: list[dict], band: str) -> tuple[set[str], set[str]]:
@@ -2508,6 +2601,12 @@ def _extract_video_id(value: str) -> str | None:
     return None
 
 
+def _auth_provider(session: Session, user_id: str) -> str:
+    from app.auth.models import User  # local: keeps the profile module free of an import cycle with auth
+    user = session.get(User, user_id)
+    return user.auth_provider if user is not None else "password"
+
+
 def profile_summary(session: Session, user_id: str) -> dict:
     prof = session.get(UserProfile, user_id)
     conds = session.execute(
@@ -2527,6 +2626,8 @@ def profile_summary(session: Session, user_id: str) -> dict:
         # managed person can't also manage others — the frontend hides the
         # "Manage Plans for Others" entry point based on this.
         "is_managed_account": is_managed_account(session, user_id),
+        # "google" = created through Google sign-in (the delete-account screen asks for a typed word, not a password).
+        "auth_provider": _auth_provider(session, user_id),
         # The name the manager gave a managed person, so their own screen can greet them
         # by it (a managed account has no real email). Null for everyone else.
         "display_name": managed_display_name(session, user_id),

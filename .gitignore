@@ -27,3 +27,25 @@ Thumbs.db
 # Voice extraction benchmark — the real dataset and its results are local-only
 testing/voice_extraction_benchmark/dataset.json
 testing/voice_extraction_benchmark/results/
+
+# Patient-derived data exports / reference datasets - never commit
+db_export/
+eval_data/reference/
+
+# learned-words dictionary (SQLite) for the new chat pipeline
+data/trigger_words.db*
+
+# Local scratch/backups (contains copies of .env files with real keys) - never commit
+testing_temparary/
+
+# Working/test artifacts: AI test prompts + reports, draft data tables, reference-build helpers - local only
+E2E_*.md
+LIVE_*.md
+*_FOR_CLAUDE.md
+docs/LIVE_APP_TEST_REPORT.md
+data/*_DRAFT*.csv
+data/*_RANKED.csv
+data/*_audit_log.csv
+data/condition_exercise_ranking_phase1.csv
+scripts/dev_tools/reference_prompt.md
+scripts/dev_tools/build_reference_inputs.py

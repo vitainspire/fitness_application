@@ -12,7 +12,11 @@ bp = Blueprint("rehab", __name__, url_prefix="/v1/rehab")
 
 
 def _body() -> dict:
-    data = request.get_json(silent=True)
+    try:
+        data = request.get_json(silent=True)
+    except RecursionError:
+        # A deeply nested JSON body (for example 5,000 "[") used to crash the JSON decoder with a RecursionError = HTTP 500 and a Slack alert.
+        raise ValidationError("Expected a JSON object body.")
     if not isinstance(data, dict):
         raise ValidationError("Expected a JSON object body.")
     return data
@@ -81,6 +85,9 @@ def query():
             raise ValidationError("program_confirmation must be an object.")
         # Same bug class as the two checks above: validate the inner field's
         # type here too, rather than letting a malformed value reach service.py.
+        mode = program_confirmation.get("mode")
+        if mode is not None and mode not in ("add", "switch"):
+            raise ValidationError("program_confirmation.mode must be 'add' or 'switch'.")
         activity_types = program_confirmation.get("activity_types")
         if activity_types is not None and (
             not isinstance(activity_types, list)
@@ -107,6 +114,13 @@ def query():
         # AttributeError — an uncaught 500. This file already guards the
         # confirmation sub-fields this way; the main field was missed.
         raise ValidationError("'question' must be a string.")
+    # A NUL byte (PostgreSQL text cannot hold it) or a lone invalid surrogate (cannot be encoded as UTF-8) used to reach the database / logger and crash with HTTP 500.
+    try:
+        question.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValidationError("Your message contains characters that can't be sent.")
+    if "\x00" in question:
+        raise ValidationError("Your message contains characters that can't be sent.")
     with session_scope() as s:
         return jsonify(service.answer_query(
             s, g.user_id, question,

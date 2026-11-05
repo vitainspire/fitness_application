@@ -277,6 +277,10 @@ class UserProgram(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="template")
     suspended_reason: Mapped[str | None] = mapped_column(String(256))
+    # Set only by the chat's "Switch" (set_program_to_activities with hide_others): what this entry was BEFORE the switch put it in the
+    # plan - "new" (it had no row) or "suspended:<reason>" (it was paused/removed). NULL = not put here by a switch (it was already active,
+    # or it came from Add / the player). "undo my changes" uses it to put the entry back to that earlier state.
+    switch_undo: Mapped[str | None] = mapped_column(String(256))
     # Soreness-reduction (separate concept from suspended_reason/status above —
     # a soreness-reduced entry stays status="active" and fully visible, just at
     # a lower target, unlike a true suspension which hides the entry). NULL

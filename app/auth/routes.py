@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from flask import Blueprint, current_app, g, jsonify, request
 
+from app.auth import google as google_auth
 from app.auth import service
 from app.gateway.middleware import enforce_preauth_rate_limits, require_auth
 from app.platform.db import session_scope
-from app.platform.errors import ValidationError
+from app.platform.errors import NotFound, ValidationError
 from app.platform.mailer import build_password_reset_html, send_email
 
 bp = Blueprint("auth", __name__, url_prefix="/v1/auth")
@@ -108,6 +109,21 @@ def login():
             device_id=_device_id(),
         )
         return _pair_response(pair)
+
+
+@bp.post("/google")
+def google_sign_in():
+    """Sign up or sign in with Google (one endpoint for both). The body is {"credential": <Google ID token>}."""
+    enforce_preauth_rate_limits()
+    data = _body()
+    cfg = current_app.config["APP_CONFIG"]
+    if not cfg.google_client_id:
+        raise NotFound("Google sign-in is not enabled.")
+    info = google_auth.verify_google_id_token(_str_field(data, "credential"), cfg.google_client_id)
+    with session_scope() as session:
+        user, pair, is_new = service.google_login(session, cfg, info, _device_id())
+        return _pair_response(pair, status=201 if is_new else 200,
+                              user_id=user.id, email=user.email, is_new_user=is_new)
 
 
 @bp.post("/refresh")
@@ -258,5 +274,6 @@ def delete_account():
     data = _body()
     cfg = current_app.config["APP_CONFIG"]
     with session_scope() as session:
-        service.delete_account(session, cfg, g.user_id, password=_str_field(data, "password"))
+        service.delete_account(session, cfg, g.user_id, password=_str_field(data, "password"),
+                               confirm=_str_field(data, "confirm"))
     return jsonify({"status": "deletion_scheduled"})

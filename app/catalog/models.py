@@ -269,6 +269,31 @@ class ConditionInteractionCell(Base):
     )
 
 
+class ConditionCombinationCell(Base):
+    """One verdict per EXACT SET of saved conditions x activity, from the audited
+    794-combination table (data/condition_combinations_794_AUDITED.csv) — the same
+    table the chat pipeline answers from, so the app's own safety check (starting
+    program, add-exercise screen) can never disagree with the chat.
+
+    `condition_set` is the sorted condition codes joined with "|" ("" = no saved
+    condition). A set with no row here (a refer-bucket condition, a condition
+    outside the 12, 5+ conditions) simply adds nothing: the per-condition grid and
+    the pair table underneath it still apply, so this table can only ADD a block.
+    """
+    __tablename__ = "condition_combinations"
+
+    condition_set: Mapped[str] = mapped_column(String(300), primary_key=True)
+    activity_type: Mapped[str] = mapped_column(
+        String(64), ForeignKey("activity_taxonomy.activity_type", ondelete="CASCADE"),
+        primary_key=True)
+    condition_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("verdict IN ('safe','modify','avoid')", name="cc_verdict_known"),
+    )
+
+
 class VideoCatalog(Base):
     """Curated YouTube links (Module 6). Link-only: no embeds, no live API call."""
     __tablename__ = "video_catalog"

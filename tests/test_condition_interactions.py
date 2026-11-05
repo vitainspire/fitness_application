@@ -116,7 +116,8 @@ def _restore_real_seed_data(monkeypatch):
 # --- service-layer: verdict escalation --------------------------------------
 
 def test_single_condition_alone_does_not_escalate(make_user):
-    user = make_user(condition_codes=[COND_A])
+    # chronic_back_pain alone (not arthritis_knee: the audited 794 table now marks running `avoid` for knee pain on its own) keeps running at `modify`
+    user = make_user(condition_codes=["chronic_back_pain"])
     with session_scope() as s:
         modified = profile_service._modified_activities(s, user["user_id"])
         blocked = profile_service._blocked_activities(s, user["user_id"])
@@ -175,7 +176,8 @@ def test_add_program_entry_confirmed_writes_pair_override_consent(make_user):
 # --- build_program: auto-suspend / resurrect on condition change -----------
 
 def test_build_program_auto_suspends_when_pair_completes(make_user):
-    user = make_user(condition_codes=[COND_A])
+    # Starts with obesity (running is `modify` for it alone, in the old grid AND the audited 794 table); knee pain alone is `avoid` in the audited table now.
+    user = make_user(condition_codes=[COND_B])
     with session_scope() as s:
         entry = s.get(UserProgram, (user["user_id"], ACTIVITY))
         assert entry.status == "active"  # only modify so far, not blocked
@@ -188,20 +190,20 @@ def test_build_program_auto_suspends_when_pair_completes(make_user):
 
 
 def test_build_program_resurrects_when_pair_breaks(make_user):
-    # Starts with only COND_A so the entry is created ACTIVE first (running is
-    # only `modify` for arthritis_knee alone) — build_program never creates a
+    # Starts with only COND_B (obesity) so the entry is created ACTIVE first (running is
+    # only `modify` for obesity alone) — build_program never creates a
     # row at all for an activity that's already blocked the very first time it
     # sees a user (see its own "if entry is None: if not is_blocked: create"
     # logic), so a user onboarded with both conditions from day one would have
     # no row here to resurrect in the first place.
-    user = make_user(condition_codes=[COND_A])
+    user = make_user(condition_codes=[COND_B])
     with session_scope() as s:
         _onboard(s, user["user_id"], [COND_A, COND_B])  # completes the pair -> suspends
         entry = s.get(UserProgram, (user["user_id"], ACTIVITY))
         assert entry.status == "suspended"
 
     with session_scope() as s:
-        _onboard(s, user["user_id"], [COND_A])  # breaks the pair
+        _onboard(s, user["user_id"], [COND_B])  # breaks the pair
         entry = s.get(UserProgram, (user["user_id"], ACTIVITY))
         assert entry.status == "active"
         assert entry.suspended_reason is None

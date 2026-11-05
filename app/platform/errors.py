@@ -62,6 +62,14 @@ class QuotaExhausted(ApiError):
 
 
 def register_error_handlers(app: Flask) -> None:
+    @app.errorhandler(RecursionError)
+    def _handle_recursion(exc: RecursionError):
+        # A deeply nested JSON body (thousands of "[") crashes the JSON decoder with a RecursionError. That is the sender's fault, not a server fault: a clean 400 and no
+        # "Server error" alert (found by the abuse test; it also hit /v1/auth/login and /v1/profile/onboarding).
+        response = jsonify({"error": {"code": "validation_failed", "message": "Expected a JSON object body."}})
+        response.status_code = 400
+        return response
+
     @app.errorhandler(ApiError)
     def _handle_api_error(exc: ApiError):
         body = {"error": {"code": exc.code, "message": exc.message}}
