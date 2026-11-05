@@ -112,3 +112,26 @@ def test_the_prompt_tells_the_model_to_keep_the_spoken_distance(make_user, monke
     with session_scope() as s:
         voice_service.extract_activities(s, make_user()["user_id"], "x", openrouter_api_key="unused")
     assert "Never leave set_amounts empty when a distance was spoken" in seen["p"]
+
+
+def test_distance_in_words_on_another_exercise_does_not_block_a_time_only_one(make_user, monkeypatch):
+    """Speech-to-text writes numbers as words. "walked two kilometers ... jogged thirty minutes": the
+    kilometers belong to the walk (which carries 2 km), so the jogging still gets its pace estimate."""
+    out = _extract(monkeypatch, make_user(), "I did walking of two kilometers and jogging of thirty minutes",
+                   [_e("walk", [2]), _e("running", [], 30)])
+    by = {e["activity_type"]: e for e in out}
+    assert by["walk"]["set_amounts"] == [2]
+    assert by["running"]["set_amounts"] == [4.29] and by["running"]["estimated_from_minutes"] == 30
+
+
+def test_a_custom_distance_exercise_also_accounts_for_the_spoken_distance(make_user, monkeypatch):
+    out = _extract(monkeypatch, make_user(), "I cycled five kilometers and ran for thirty minutes",
+                   [{"activity_type": None, "activity_name": "cycling", "is_custom": True,
+                     "set_amounts": [5], "unit": "km", "duration_minutes": None}, _e("running", [], 30)])
+    by = {(e["activity_type"] or e["activity_name"]): e for e in out}
+    assert by["cycling"]["set_amounts"] == [5] and by["running"]["set_amounts"] == [4.29]
+
+
+def test_the_words_case_is_still_unguessed_when_nothing_carries_the_distance(make_user, monkeypatch):
+    out = _extract(monkeypatch, make_user(), "I walked two kilometers in fifteen minutes", [_e("walk", [], 15)])
+    assert out == []

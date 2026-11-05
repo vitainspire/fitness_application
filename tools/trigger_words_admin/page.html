@@ -1,0 +1,74 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Developer review</title><style>
+:root{--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--border:rgba(11,11,11,.12);--good:#1baf7a;--bad:#d03b3b;--warn:#eda100;--accent:#2a78d6}
+@media (prefers-color-scheme:dark){:root{--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#2c2c2a;--border:rgba(255,255,255,.12);--good:#199e70;--bad:#d95926;--warn:#c98500;--accent:#3987e5}}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding-bottom:90px}
+header,main{max-width:1000px;margin:0 auto;padding:0 16px}header{padding-top:20px}h1{font-size:22px;margin:0 0 4px}header p{margin:2px 0;color:var(--ink2)}
+.badge{display:inline-block;font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid var(--warn);color:var(--warn);margin-bottom:6px}
+.tiles{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.tile{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 16px;min-width:120px}
+.tile b{display:block;font-size:24px}.tile span{color:var(--ink2);font-size:12.5px}
+h2{font-size:16px;margin:22px 0 8px}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--grid);vertical-align:middle}th{color:var(--ink2);font-size:12.5px}
+td.word{font-weight:700;font-size:15px}td.warn{background:rgba(237,161,0,.35)}
+select{background:var(--page);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:4px 6px}
+button{font:inherit;border-radius:8px;border:1px solid var(--border);background:var(--page);color:var(--ink);padding:5px 14px;cursor:pointer}
+button.ok.on{background:var(--good);color:#fff;border-color:var(--good)}button.rej.on{background:var(--bad);color:#fff;border-color:var(--bad)}
+tr.approved td{background-image:linear-gradient(rgba(27,175,122,.10),rgba(27,175,122,.10))}tr.rejected td{background-image:linear-gradient(rgba(208,59,59,.10),rgba(208,59,59,.10))}
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:12px 16px}
+.bar div{max-width:1000px;margin:0 auto;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+button.submit{background:var(--accent);color:#fff;border-color:var(--accent);padding:8px 22px;font-weight:600}button:disabled{opacity:.45;cursor:default}
+#msg{margin:14px 0;padding:10px 14px;border:1px solid var(--good);border-radius:10px;display:none}#msg.err{border-color:var(--bad)}
+.note{color:var(--muted);font-size:12.5px;margin-top:10px}
+</style></head><body>
+<header><span class="badge">Developer only - not shown to chatbot users</span><h1>Review the words the AI used to refuse requests</h1>
+<p>Each word below made the AI refuse at least one request. Approve a word to add it to the dictionary and the embeddings, so the next request with that word stops before the AI. Reject it to leave it out. Your choices are saved as you click; nothing is downloaded.</p></header>
+<main><div class="tiles"><div class="tile"><b id="tp">0</b><span>pending</span></div><div class="tile"><b id="ta">0</b><span>approved, not submitted</span></div><div class="tile"><b id="tr">0</b><span>rejected</span></div><div class="tile"><b id="ts">0</b><span>in the dictionary</span></div></div>
+<div id="msg"></div>
+<table><thead><tr><th>word</th><th>label</th><th>times the AI returned it</th><th>decision</th></tr></thead><tbody id="rows"></tbody></table>
+<p class="note">"Appears in exercise cases" = how many of the 1,000 real test inputs contain this word and are cases where the answer key suggests exercises. Above 0 (yellow) means approving the word would also stop some users who should get exercises.</p>
+<h2>Already in the dictionary</h2><table><thead><tr><th>word</th><th>label</th><th>times the AI returned it</th><th>remove</th></tr></thead><tbody id="done"></tbody></table></main>
+<div class="bar"><div><span id="sum"></span><button class="submit" id="submit">Submit approved words</button></div></div>
+<script>
+let words = [], labels = [], pendingRemove = null;
+const $ = id => document.getElementById(id);
+const say = (t, err) => { const m = $("msg"); m.style.display = "block"; m.className = err ? "err" : ""; m.innerHTML = t; };
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.status); return j;
+}
+async function load() { const j = await api("/api/words"); words = j.words; labels = j.labels; render(); }
+function render() {
+  const open = words.filter(w => w.status !== "submitted");
+  $("rows").innerHTML = open.map(r => `<tr class="${r.status}"><td class="word">${r.word}</td>
+    <td><select data-w="${r.word}">${labels.map(l => `<option${l === r.label ? " selected" : ""}>${l}</option>`).join("")}</select></td>
+    <td>${r.times_seen}</td>
+    <td><button class="ok ${r.status === "approved" ? "on" : ""}" data-w="${r.word}" data-s="approved">OK</button> <button class="rej ${r.status === "rejected" ? "on" : ""}" data-w="${r.word}" data-s="rejected">Reject</button></td></tr>`).join("");
+  $("done").innerHTML = words.filter(w => w.status === "submitted").map(r => `<tr><td class="word">${r.word}</td><td>${r.label}</td><td>${r.times_seen}</td><td><button class="rm" data-w="${r.word}">${pendingRemove === r.word ? "Click again to confirm" : "Remove"}</button></td></tr>`).join("");
+  const n = s => words.filter(w => w.status === s).length;
+  $("tp").textContent = n("pending"); $("ta").textContent = n("approved"); $("tr").textContent = n("rejected"); $("ts").textContent = n("submitted");
+  $("sum").textContent = `${n("approved")} approved, ${n("rejected")} rejected, ${n("pending")} still pending`;
+  $("submit").disabled = n("approved") === 0;
+}
+$("rows").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return; const w = words.find(x => x.word === b.dataset.w);
+  const status = w.status === b.dataset.s ? "pending" : b.dataset.s;
+  try { await api("/api/decisions", {decisions: [{word: w.word, status, label: w.label}]}); w.status = status; render(); } catch (err) { say("Could not save: " + err.message, true); }
+});
+$("rows").addEventListener("change", async e => {
+  if (e.target.tagName !== "SELECT") return; const w = words.find(x => x.word === e.target.dataset.w);
+  try { await api("/api/decisions", {decisions: [{word: w.word, status: w.status, label: e.target.value}]}); w.label = e.target.value; } catch (err) { say("Could not save: " + err.message, true); }
+});
+$("done").addEventListener("click", async e => {
+  const b = e.target.closest("button.rm"); if (!b) return;
+  if (pendingRemove !== b.dataset.w) { pendingRemove = b.dataset.w; render(); return; }     // first click asks, second click removes
+  pendingRemove = null;
+  try { const j = await api("/api/remove", {words: [b.dataset.w]}); say(`<b>${j.removed.length ? j.removed[0] : b.dataset.w} removed</b> from the dictionary and the embeddings (dictionary version ${j.version}). It is kept as rejected, so it will not come back as pending.`); await load(); } catch (err) { say("Could not remove: " + err.message, true); }
+});
+$("submit").addEventListener("click", async () => {
+  $("submit").disabled = true; say("Submitting: embedding the approved words...");
+  try { const j = await api("/api/submit", {}); say(`<b>${j.submitted} word(s) added to the dictionary and the embeddings.</b> The live pipeline picks them up automatically (dictionary version ${j.version}).` + (j.skipped.length ? ` Skipped (changed meanwhile): ${j.skipped.join(", ")}.` : "")); await load(); }
+  catch (err) { say(err.message, true); render(); }
+});
+load().catch(err => say("Could not load the words: " + err.message, true));
+</script></body></html>

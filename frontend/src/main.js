@@ -629,8 +629,50 @@ async function doAuth(mode) {
   }
 }
 
+// ── Google sign-in (one button for sign up AND sign in) ──
+// The backend verifies Google's token and returns the same token pair as email login; route() below then
+// shows onboarding for a new user and the dashboard for everyone else, exactly as for email accounts.
+let AUTH_PROVIDER = "password"; // "google" = created via Google (delete-account asks for a typed word, not a password)
+
+async function initGoogleSignIn() {
+  const wrap = $("g-wrap");
+  if (!wrap) return;
+  let clientId = "";
+  try {
+    const cfg = await fetch(API_BASE + "/v1/app/config").then(r => r.json());
+    clientId = cfg.google_client_id || "";
+  } catch { return; }
+  if (!clientId) return; // feature off on the backend: keep email + password only
+  for (let i = 0; i < 50 && !(window.google && window.google.accounts && window.google.accounts.id); i++) {
+    await new Promise(r => setTimeout(r, 100)); // Google's script loads async
+  }
+  if (!(window.google && window.google.accounts && window.google.accounts.id)) return;
+  window.google.accounts.id.initialize({
+    client_id: clientId, callback: onGoogleCredential, auto_select: false, ux_mode: "popup",
+  });
+  window.google.accounts.id.renderButton($("g-btn"), {
+    theme: "outline", size: "large", text: "continue_with", shape: "pill", width: 300,
+  });
+  wrap.style.display = "flex";
+}
+
+async function onGoogleCredential(resp) {
+  try {
+    const d = await api("POST", "/v1/auth/google", {credential: resp.credential});
+    AT = d.access_token; RT = d.refresh_token; EMAIL = d.email || "";
+    localStorage.setItem("at", AT); localStorage.setItem("rt", RT); localStorage.setItem("em", EMAIL);
+    $("a-err").className = "hidden";
+    await route();
+  } catch (e) {
+    $("a-err").textContent = e.message || "Google sign-in failed. Please try again.";
+    $("a-err").className = "rounded-lg px-md py-sm font-body-md bg-error-container text-on-error-container text-xs";
+  }
+}
+initGoogleSignIn();
+
 async function route() {
   const p = await api("GET", "/v1/profile");
+  AUTH_PROVIDER = p.auth_provider || "password";
   IS_MANAGED_ACCOUNT = !!p.is_managed_account; // read by go()'s own nav-button rendering
   MANAGED_DISPLAY_NAME = p.display_name || "";
   renderNotifBadge();
@@ -3486,6 +3528,9 @@ async function runQuery(question, confirmation) {
       // The error body carries no quota field, so re-fetch it directly rather
       // than leave the badge showing a stale count until the next page load.
       try { renderQuota(await api("GET", "/v1/rehab/quota")); } catch (_) {}
+    } else {
+      // Any other failure (a too-long message 422, a server error, no network) used to leave the chat silent after the user's own bubble.
+      appendChatBubble(e.message || "Something went wrong. Please try again.", false);
     }
   }
 }
@@ -3511,10 +3556,14 @@ function renderChatResponse(d) {
   appendChatBubble(d.answer, false);
 
   if (d.needs_program_update_confirmation && d.suggested_activities?.length) {
-    appendProgramSuggestionChip(d.suggested_activities);
+    if (d.program_update_modes?.length > 1) appendProgramChoiceChips(d.suggested_activities, d.program_update_modes);   // V2: the user chooses Add or Switch
+    else appendProgramSuggestionChip(d.suggested_activities, d.program_update_modes?.length === 1 ? d.program_update_modes[0] : d.program_update_mode);   // one choice offered: use it, not the older field (it said "switch" for an add-only offer)
   }
   if (d.needs_revert_confirmation && d.revert_candidates?.length) {
     appendRevertChip(d.revert_candidates);
+  }
+  if (d.needs_escalation_confirmation && d.escalation_proposal) {
+    appendEscalationChip(d.escalation_proposal);
   }
 }
 
@@ -3526,7 +3575,7 @@ function renderChatResponse(d) {
 // hidden (never deleted, see service.py's set_program_to_activities), so
 // switching focus to a new sport can't destroy progress on something the
 // user might want back later.
-function appendProgramSuggestionChip(activities) {
+function appendProgramSuggestionChip(activities, mode) {
   const wrap = document.createElement("div");
   wrap.className = "self-start max-w-[90%] mt-1";
 
@@ -3538,7 +3587,9 @@ function appendProgramSuggestionChip(activities) {
   // "+ Add these to my program" wording promised something this button
   // never actually did, so a user confirming it could lose exercises from
   // their dashboard with no warning.
-  btn.textContent = `↻ Switch my program to: ${names} (other exercises will be paused, not deleted)`;
+  btn.textContent = mode === "add"
+    ? `＋ Add to my program: ${names} (nothing else changes)`
+    : `↻ Switch my program to: ${names} (other exercises will be paused, not deleted)`;
   btn.className = "px-md py-sm rounded-2xl font-label-sm text-label-sm text-left border border-primary-fixed bg-primary-fixed/10 text-on-primary-fixed-variant active:scale-95 transition-transform disabled:opacity-40";
 
   btn.onclick = async () => {
@@ -3548,7 +3599,7 @@ function appendProgramSuggestionChip(activities) {
     try {
       const activity_types = activities.map(a => a.activity_type);
       const result = await api("POST", "/v1/rehab/query", {
-        program_confirmation: {activity_types, confirmed: true},
+        program_confirmation: {activity_types, confirmed: true, mode: mode === "add" ? "add" : "switch"},
       });
       appendChatBubble(result.message, false);
       wrap.remove();
@@ -3564,6 +3615,81 @@ function appendProgramSuggestionChip(activities) {
   wrap.scrollIntoView({behavior: "smooth", block: "end"});
 }
 
+// Pipeline V2: under an answer that names approved exercises the user picks the mode themselves. Add is first and changes nothing else; Switch pauses the other
+// exercises (never deletes them, and "undo my changes" brings them back). Tapping either one disables both.
+function appendProgramChoiceChips(activities, modes) {
+  const wrap = document.createElement("div");
+  wrap.className = "self-start max-w-[90%] mt-1 flex flex-col gap-xs";
+  const names = activities.map(a => a.display_name).join(", ");
+  const cls = "px-md py-sm rounded-2xl font-label-sm text-label-sm text-left border border-primary-fixed bg-primary-fixed/10 text-on-primary-fixed-variant active:scale-95 transition-transform disabled:opacity-40";
+  const labels = {
+    add: `＋ Add to my program: ${names} (nothing else changes)`,
+    switch: `↻ Switch to these: ${names} (pauses your other exercises; nothing is deleted)`,
+  };
+  modes.forEach(mode => {
+    const btn = document.createElement("button");
+    btn.textContent = labels[mode] || labels.add;
+    btn.className = cls;
+    btn.onclick = async () => {
+      wrap.querySelectorAll("button").forEach(b => b.disabled = true);
+      const originalText = btn.textContent;
+      btn.textContent = "Updating your program…";
+      try {
+        const activity_types = activities.map(a => a.activity_type);
+        const result = await api("POST", "/v1/rehab/query", {
+          program_confirmation: {activity_types, confirmed: true, mode: mode === "add" ? "add" : "switch"},
+        });
+        appendChatBubble(result.message, false);
+        wrap.remove();
+      } catch (e) {
+        toast(e.message, true);
+        wrap.querySelectorAll("button").forEach(b => b.disabled = false);
+        btn.textContent = originalText;
+      }
+    };
+    wrap.appendChild(btn);
+  });
+  $("c-thread").appendChild(wrap);
+  wrap.scrollIntoView({behavior: "smooth", block: "end"});
+}
+
+// "Increase your target": the server offers a small increase only when the exercise is eligible (adherence, no plateau, safe for the user's conditions). The chat used to
+// say "you are eligible" with no way to act on it. The server re-derives the percentage when this is confirmed and never trusts a number from the browser, so only the
+// exercise and "confirmed" are sent.
+function appendEscalationChip(proposal) {
+  const wrap = document.createElement("div");
+  wrap.className = "self-start max-w-[90%] mt-1 flex flex-col gap-xs";
+  const pct = Math.round((Number(proposal.proposed_pct_increase) || 0) * 100);
+  const cls = "px-md py-sm rounded-2xl font-label-sm text-label-sm text-left border border-primary-fixed bg-primary-fixed/10 text-on-primary-fixed-variant active:scale-95 transition-transform disabled:opacity-40";
+  const yes = document.createElement("button");
+  yes.textContent = `↑ Yes, increase my ${proposal.display_name} target by ${pct}%`;
+  yes.className = cls;
+  const no = document.createElement("button");
+  no.textContent = "Not now";
+  no.className = cls;
+  yes.onclick = async () => {
+    wrap.querySelectorAll("button").forEach(b => b.disabled = true);
+    const originalText = yes.textContent;
+    yes.textContent = "Updating your target…";
+    try {
+      const result = await api("POST", "/v1/rehab/query", {
+        escalation_confirmation: {activity_type: proposal.activity_type, confirmed: true},
+      });
+      appendChatBubble(result.message || "Done.", false);
+      wrap.remove();
+    } catch (e) {
+      toast(e.message, true);
+      wrap.querySelectorAll("button").forEach(b => b.disabled = false);
+      yes.textContent = originalText;
+    }
+  };
+  no.onclick = () => wrap.remove();
+  wrap.appendChild(yes);
+  wrap.appendChild(no);
+  $("c-thread").appendChild(wrap);
+  wrap.scrollIntoView({behavior: "smooth", block: "end"});
+}
+
 // Found live (user request): "revert what I did previously" via the chat —
 // the chatbot looks up what a PAST sport-suggestion confirmation actually
 // hid (never a manual removal, see service.py's _hidden_by_sport_focus_change)
@@ -3573,9 +3699,13 @@ function appendRevertChip(candidates) {
   const wrap = document.createElement("div");
   wrap.className = "self-start max-w-[90%] mt-1";
 
-  const names = candidates.map(a => a.display_name).join(", ");
+  const back = candidates.filter(a => a.action !== "pause").map(a => a.display_name).join(", ");
+  const out = candidates.filter(a => a.action === "pause").map(a => a.display_name).join(", ");
   const btn = document.createElement("button");
-  btn.textContent = `↺ Bring these back: ${names}`;
+  // a Switch that only paused exercises keeps the old wording; one that also added some says what Undo does with them
+  btn.textContent = out
+    ? `↺ Put my plan back${back ? `: bring back ${back}` : ""}; take out ${out}`
+    : `↺ Bring these back: ${back}`;
   btn.className = "px-md py-sm rounded-2xl font-label-sm text-label-sm text-left border border-primary-fixed bg-primary-fixed/10 text-on-primary-fixed-variant active:scale-95 transition-transform disabled:opacity-40";
 
   btn.onclick = async () => {
@@ -3618,8 +3748,14 @@ function appendConditionChoices(opts) {
     return b;
   };
 
+  if (opts.description) {                                  // V2: a one-line plain description, so the user can tell if it fits before tapping
+    const info = document.createElement("div");
+    info.className = "w-full font-label-sm text-label-sm text-secondary";
+    info.textContent = `${opts.matched_label}: ${opts.description}`;
+    wrap.appendChild(info);
+  }
   wrap.appendChild(makeChip(opts.matched_label, opts.matched_code));
-  wrap.appendChild(makeChip("Something else / not sure", null));
+  wrap.appendChild(makeChip(opts.description ? "None of these, just answer me" : "Something else / not sure", null));
   $("c-thread").appendChild(wrap);
   wrap.scrollIntoView({behavior: "smooth", block: "end"});
 }
@@ -4016,6 +4152,7 @@ async function openTargetChangesHistory() {
 }
 
 async function doLogout() {
+  try { window.google?.accounts?.id?.disableAutoSelect(); } catch {} // so Google doesn't sign them straight back in
   try { await api("POST","/v1/auth/logout",{refresh_token:RT}); } catch {}
   // RT too, not just AT — every other sign-out path (savePassword,
   // delAccount) clears both, and leaving the in-memory refresh token
@@ -4029,9 +4166,13 @@ async function delAccount() {
   // third-pass code audit — the most destructive action in the app used to
   // need only a valid session, no re-authentication).
   // Masked in-app box (the browser prompt() showed the typed password in clear text).
+  // A Google-created account has no password the user knows, so it re-confirms by typing DELETE instead.
+  const isGoogle = AUTH_PROVIDER === "google";
   const password = await appPrompt({
-    message: "Confirm your password to delete your account.", confirmText: "Delete account", danger: true,
-    inputType: "password", placeholder: "Your password", autocomplete: "current-password",
+    message: isGoogle ? "Type DELETE to confirm deleting your account." : "Confirm your password to delete your account.",
+    confirmText: "Delete account", danger: true,
+    inputType: isGoogle ? "text" : "password", placeholder: isGoogle ? "DELETE" : "Your password",
+    autocomplete: isGoogle ? "off" : "current-password",
   });
   if (!password) return;
   // Only sign out if the delete actually succeeded. Swallowing the error and
@@ -4041,7 +4182,7 @@ async function delAccount() {
   // still live. doLogout's empty catch above is fine for the opposite reason:
   // there, ending the local session is the whole point either way.
   try {
-    await api("DELETE", "/v1/account", {password});
+    await api("DELETE", "/v1/account", isGoogle ? {confirm: password} : {password});
   } catch (e) {
     toast(e.message || "Could not delete your account. Please try again.", true);
     return;

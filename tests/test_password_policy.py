@@ -144,3 +144,40 @@ def test_password_reset_request_and_confirm_flow(client):
     )
     assert r.status_code == 200
     assert "access_token" in r.get_json()
+
+
+# --- breach check when the live lookup is unreachable -------------------------------------
+
+def _lookup_down(monkeypatch):
+    import requests
+    from app.auth import passwords
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(passwords.requests, "get", boom)
+
+
+def test_breach_lookup_down_still_refuses_very_common_password(monkeypatch):
+    _lookup_down(monkeypatch)
+    with pytest.raises(ValidationError, match="data breach"):
+        validate_password("Password123!", breach_check=True)
+
+
+def test_breach_lookup_down_still_accepts_normal_password(monkeypatch):
+    _lookup_down(monkeypatch)
+    validate_password("Violet-Harbor-Tea-41!", breach_check=True)
+
+
+def test_breach_lookup_up_uses_live_answer_not_fallback(monkeypatch):
+    # Live lookup answers "not breached": the built-in list must not override it.
+    from app.auth import passwords
+
+    class Resp:
+        text = "0000000000000000000000000000000000A:1"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(passwords.requests, "get", lambda *a, **k: Resp())
+    validate_password("Password123!", breach_check=True)

@@ -51,7 +51,7 @@ def test_strong_retrieval_still_reaches_the_answer_llm(make_user, monkeypatch):
 
     def fake_chat_complete(*a, **k):
         called["hit"] = True
-        return "a real answer using the retrieved text"
+        return "a real answer using the retrieved text about what causes gout flare-ups"
     monkeypatch.setattr(vectorstore, "chat_complete", fake_chat_complete)
 
     with session_scope() as s:

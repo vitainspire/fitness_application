@@ -144,6 +144,8 @@ class Config:
 
     # --- Email / Mailer & Frontend URL ------------------------------------
     frontend_url: str = "http://localhost:5173"
+    # Google sign-in: the OAuth Web client ID (public, not a secret). Empty = the feature is switched off.
+    google_client_id: str = ""
     mail_from: str = "ayush.kumar@vitainspire.com"
     mail_sender_name: str = "ViTAinspire"
     smtp_host: str = ""
@@ -330,6 +332,7 @@ def load_config() -> Config:
         cors_origins=_cors_origins(is_prod),
         service_role=service_role,
         frontend_url=_optional("FRONTEND_URL", _optional("APP_BASE_URL", "http://localhost:5173")).rstrip("/"),
+        google_client_id=_optional("GOOGLE_CLIENT_ID", "").strip(),
         mail_from=_optional("MAIL_FROM", _optional("SMTP_FROM", "ayush.kumar@vitainspire.com")),
         mail_sender_name=_optional("MAIL_SENDER_NAME", "ViTAinspire"),
         smtp_host=_optional("SMTP_HOST", ""),

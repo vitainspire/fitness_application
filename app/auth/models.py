@@ -48,6 +48,14 @@ class User(Base):
     is_staff: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
                                             server_default="false")
 
+    # Google sign-in: `google_sub` is Google's permanent id for the person (never changes, unlike the
+    # email). auth_provider "google" means the account was CREATED through Google and has no password
+    # the user knows (a random one is stored, as managed accounts do); "password" is every other account,
+    # including password accounts that later linked a Google login.
+    google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    auth_provider: Mapped[str] = mapped_column(String(16), nullable=False, default="password",
+                                               server_default="password")
+
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )

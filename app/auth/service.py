@@ -80,6 +80,65 @@ def signup(session: Session, cfg: Config, email: str, password: str,
     return user, pair, verify_raw
 
 
+def google_login(session: Session, cfg: Config, info: dict, device_id: str
+                 ) -> tuple[User, tk.TokenPair, bool]:
+    """One button for sign-up AND sign-in. `info` comes from app.auth.google.verify_google_id_token.
+
+    1. A user already linked to this Google id logs in.
+    2. Otherwise an existing ACTIVE account with the same (Google-verified) email is linked, so someone who
+       signed up with a password isn't split into two accounts. Only done because Google vouches for the email.
+    3. Otherwise a new account is created: email already verified, and a random password nobody knows
+       (the same approach open_invite uses for managed accounts).
+    Returns (user, token pair, is_new_user). The frontend's existing route() sends a not-yet-onboarded user to
+    onboarding and everyone else to the dashboard."""
+    from app.auth.passwords import hash_password
+
+    if not info.get("email_verified"):
+        raise ValidationError("Your Google email address is not verified.")
+    sub = info["sub"]
+    email = _normalise_email(info["email"])
+    if len(email) > 320:
+        raise ValidationError("Email address is too long.")
+
+    is_new = False
+    user = session.scalar(select(User).where(User.google_sub == sub))
+    if user is None:
+        user = session.scalar(select(User).where(User.email == email))
+        if user is not None and user.is_active:
+            user.google_sub = sub
+            if user.email_verified_at is None:
+                # Nobody ever proved they own this address on the password side: anyone could have signed up with
+                # it. Google has now proved the real owner, so the password the sign-up used is thrown away (a
+                # random one nobody knows replaces it) and every session opened with it is ended. Otherwise a
+                # stranger who pre-registered the victim's email would keep a working password and live sessions
+                # into the victim's account. The owner can set a new password with "forgot password" if wanted.
+                user.password_hash = hash_password(secrets.token_urlsafe(24))
+                user.email_verified_at = tk.now_utc()
+                tk.revoke_all_refresh_tokens(session, user.id)
+                tk.set_tokens_valid_after(user.id, cfg)
+            session.flush()
+        elif user is None:
+            user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(24)),
+                        google_sub=sub, auth_provider="google", email_verified_at=tk.now_utc())
+            session.add(user)
+            try:
+                session.flush()
+                is_new = True
+            except IntegrityError:
+                # Two near-simultaneous first sign-ins: the database constraint lets exactly one create it.
+                session.rollback()
+                user = (session.scalar(select(User).where(User.google_sub == sub))
+                        or session.scalar(select(User).where(User.email == email)))
+                if user is None:
+                    raise Conflict("Could not create the account. Please try again.")
+    if user is None or not user.is_active:
+        raise Unauthorized("This account is not available.")
+
+    access, access_exp, _ = tk.issue_access_token(cfg, user.id)
+    raw_refresh, refresh_row = tk.issue_refresh_token(session, cfg, user.id, device_id)
+    return user, tk.TokenPair(access, raw_refresh, access_exp, refresh_row.expires_at), is_new
+
+
 # --- Login -----------------------------------------------------------------
 
 def _lockout_delay(cfg: Config, failures: int) -> int:
@@ -429,7 +488,7 @@ def _purge_user_data(session: Session, user_id: str) -> None:
 
 
 def delete_account(session: Session, cfg: Config, user_id: str, *, password: str,
-                   pitr_days: int = 35) -> None:
+                   confirm: str = "", pitr_days: int = 35) -> None:
     """1.10 — permanently purge user health data and release the email address.
 
     Found live (third-pass code audit): the single most destructive action in
@@ -462,13 +521,19 @@ def delete_account(session: Session, cfg: Config, user_id: str, *, password: str
         raise Forbidden(
             "This account is managed by someone else — only they can delete it."
         )
-    if not verify_password(user.password_hash, password):
+    if user.auth_provider == "google":
+        # Created through Google: there is no password the user knows, so the re-confirmation step is a
+        # typed word instead (a leaked access token alone still can't delete the account by accident).
+        if (confirm or "").strip().upper() != "DELETE":
+            raise ValidationError("Type DELETE to confirm deleting your account.")
+    elif not verify_password(user.password_hash, password):
         raise ValidationError("Password is incorrect.")
 
     now = tk.now_utc()
     user.deleted_at = now
     # Free the unique email constraint so the user can re-register anytime with their original email
     user.email = f"deleted_{user.id}_{int(now.timestamp())}@deleted.invalid"
+    user.google_sub = None  # same reason: lets the person sign up with Google again later
 
     tk.revoke_all_refresh_tokens(session, user_id)
     tk.set_tokens_valid_after(user_id, cfg)

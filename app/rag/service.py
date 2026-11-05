@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select, update
@@ -36,12 +38,12 @@ from app.profile.models import ActivityLog, UserCondition, UserProfile, UserProg
 from app.profile.service import (
     IST, REFERRAL_MESSAGE, activity_log_date_bounds, activity_log_detail,
     complete_onboarding, is_referred, restore_program_activities,
-    set_program_to_activities, today_ist,
+    set_program_to_activities, switch_added_activity_types, today_ist, undo_switch_additions,
 )
 from app.relationships.service import is_managed_account
 from app.progression import analysis as progression_analysis
 from app.progression import service as progression_service
-from app.rag import vectorstore
+from app.rag import chat_messages, chat_prompts, chat_rules, exercise_table, new_flow, program_agent, router as chat_router, targets_answer, v2, vectorstore
 from app.rag.models import RehabChatLog, RehabMemory, RehabQuota
 from app.rag.vectorstore import ResponseTruncated, UpstreamUnavailable
 
@@ -53,7 +55,7 @@ QUOTA_TYPE = "rehab_llm"
 # some paths didn't touch this counter at all — 15 was sized against that
 # leakier design, not against real per-message cost. 5 matches the number
 # _refund_quota's own docstring already referenced.
-DAILY_LIMIT = 5
+DAILY_LIMIT = int(os.environ.get("REHAB_DAILY_LIMIT", "5") or 5)   # the product limit is 5; REHAB_DAILY_LIMIT only raises it for local testing
 VOICE_QUOTA_TYPE = "voice_llm"
 VOICE_DAILY_LIMIT = 60
 
@@ -266,6 +268,7 @@ SURGERY_KEYWORDS = [
     "decompression", "decompressive",
     "arthroscopy", "arthroscopic", "arthroplasty", "carpal tunnel release",
     "fasciotomy", "reconstruction", "open surgery", "surgical repair",
+    "knee replacement", "hip replacement", "joint replacement", "replacement surgery", "surgery", "surgical",
 ]
 # Broader net than an exact-name list can ever be: common surgical-procedure
 # suffixes catch specific procedures across all 84 conditions without having to
@@ -420,6 +423,19 @@ def _hidden_by_sport_focus_change(session: Session, user_id: str) -> list[dict]:
         )
     ).all()
     return [{"activity_type": a, "display_name": d} for a, d in rows]
+
+
+def _revert_candidates(session: Session, user_id: str) -> list[dict]:
+    """Everything "undo my changes" would change, each with what it does: action "restore" (a Switch paused it: bring it back) or
+    "pause" (a Switch put it in the plan: put it back to what it was before - removed again, or paused). An exercise a switch both added
+    and a later switch paused counts as "pause", because the plan from before the switches did not have it."""
+    added = set(switch_added_activity_types(session, user_id))
+    restore = [{**h, "action": "restore"} for h in _hidden_by_sport_focus_change(session, user_id) if h["activity_type"] not in added]
+    pause = []
+    if added:
+        names = dict(session.execute(select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name).where(ActivityTaxonomy.activity_type.in_(added))).all())
+        pause = [{"activity_type": a, "display_name": names.get(a, a), "action": "pause"} for a in sorted(added)]
+    return restore + pause
 
 
 def _enforce_approved_exercises_only(session: Session, answer: str,
@@ -793,6 +809,369 @@ def _demote_if_extended_topic_fits_better(question: str, matched_code: str, *,
     if closest_code in vectorstore.EXTENDED_TOPICS and similarity >= EXTENDED_TOPIC_OVERRIDE_THRESHOLD:
         return None
     return matched_code
+
+
+def _run_router(session: Session, user_id: str, question: str, api_key: str) -> dict | None:
+    """NEW_ROUTER: the one merged call. None on any failure (the caller then uses the old separate calls)."""
+    try:
+        previous = _recent_full_exchanges(session, user_id, limit=1)
+        earliest, latest = activity_log_date_bounds(session, user_id)
+        bounds = (f"The user's real logged history runs from {earliest.isoformat()} to {latest.isoformat()}."
+                  if earliest else "The user has no logged activity history yet.")
+        return chat_router.route(
+            question, saved_labels=_existing_condition_labels(session, user_id), options=_condition_options(session, user_id),
+            previous_question=previous[0].question if previous else "", previous_answer=previous[0].answer if previous else "",
+            today=today_ist(), history_bounds=bounds, api_key=api_key, v2=v2.enabled())
+    except Exception:  # noqa: BLE001
+        _log.warning("router could not run; using the old separate calls", exc_info=True)
+        return None
+
+
+def _intent_from_router(session: Session, user_id: str, question: str, rr: dict) -> dict:
+    """The router's answer in the shape _retrieve_and_answer already uses; activity_recall dates get the SAME real-date handling as _classify_data_intent."""
+    fallback = {"intent": "medical", "start_date": None, "end_date": None}
+    intent = rr["intent"]
+    if intent != "activity_recall":
+        return {"intent": intent, "start_date": None, "end_date": None}
+    today = today_ist()
+    earliest, _latest = activity_log_date_bounds(session, user_id)
+    start = _safe_parse_date(rr.get("start_date"), today)
+    end = _safe_parse_date(rr.get("end_date"), today)
+    if start is None or end is None:
+        return fallback
+    if start > end:
+        start, end = end, start
+    weekday_date = _resolve_weekday_name(question, today)
+    if weekday_date is not None:
+        start = end = weekday_date
+    if (end - start).days > MAX_RECALL_RANGE_DAYS:
+        start = end - timedelta(days=MAX_RECALL_RANGE_DAYS)
+    if earliest is not None and start < earliest:
+        start = earliest
+        end = max(end, start)
+    return {"intent": "activity_recall", "start_date": start, "end_date": end}
+
+
+def _note_shown_today(session: Session, user_id: str) -> bool:
+    """True when the 'pain is not improving' doctor note was already shown to this user today (IST)."""
+    start = datetime.combine(today_ist(), datetime.min.time(), tzinfo=IST)
+    return session.scalar(
+        select(func.count()).select_from(RehabChatLog).where(
+            RehabChatLog.user_id == user_id, RehabChatLog.created_at >= start, RehabChatLog.answer.like("%A note from the app: you%"))) > 0
+
+
+def _allowed_names(session: Session, codes: list[str]) -> list[str]:
+    """Display names the app lets the user ADD: the audited table's ranked picks plus every other exercise the table does not mark `avoid` for their exact conditions
+    (safe, or modify = allowed with caution) — the same set the app itself allows (same set as the typed-add route)."""
+    names = dict(session.execute(select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name)).all())
+    extra = exercise_table.allowed_types(codes) - exercise_table.approved_types(codes)
+    return list(exercise_table.approved_names(codes)) + [names[a] for a in sorted(extra) if a in names]
+
+
+def _blocked_named(session: Session, text: str, approved: list[str]) -> list[str]:
+    """Display names of the app's exercises that `text` names and that are NOT approved for this user (blocked by a saved condition)."""
+    catalog = {at: {"name": n, "synonyms": list(syn or [])}
+               for at, n, syn in session.execute(select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name, ActivityTaxonomy.synonyms)).all()}
+    return [catalog[a]["name"] for a in v2.match_exercises(text, catalog) if catalog[a]["name"] not in approved]
+
+
+def _sport_instruction(rr: dict, approved: list[str]) -> str:
+    """The line added to the answer prompt when the router named a sport / activity. An activity that is NOT one of the 12 checked exercises, asked about (how to, can I) and not as a
+    request for suggestions, must first be admitted as outside the app's knowledge, then answered with approved exercises only. A listed exercise, or a request for suggestions, keeps the plain rule."""
+    sport = rr["sport"]
+    def _match(names) -> bool:
+        return any(v2.norm(sport) in v2.norm(n) or v2.norm(n) in v2.norm(sport) for n in names)
+    if _match(approved):
+        return f"\n\nThe user wants exercises for: {sport}. Build your main answer ONLY from the approved exercises and say how each one helps with it."
+    if _match(ACTIVITY_CATEGORIES):                                             # one of the 12, but not approved for THIS user's conditions
+        return (f"\n\nThe user asked about {sport}, which is NOT approved for their conditions. Begin by saying plainly, in the user's language, that it is not recommended for their condition "
+                "and that they should ask their doctor or physiotherapist first. If the user says a doctor has allowed it, explain that you still cannot suggest it while the saved condition blocks it: "
+                "they can remove that condition in their profile (profile icon, then Edit) only if the problem is really solved, or log the exercise themselves as a custom exercise. "
+                "Then name ONLY approved exercises, saying how each one helps. Do not say the user has a pain or condition unless it is listed or stated.")
+    return (f"\n\nThe user mentioned an activity that is not one of the app's checked exercises, for: {sport}. You have no verified knowledge of the activity itself. "
+            "If the user asks how to do it, learn it, whether they can do it, or for a plan for it, begin by saying so plainly, in the user's language: you cannot explain how to do it, coach it or confirm it for them. "
+            "Then say you can suggest exercises you do know that build what that activity needs (for example stability, strength or fitness), and name ONLY approved exercises, saying how each one helps. "
+            "If the user only asks which exercises help with it, build your main answer ONLY from the approved exercises and say how each one helps. "
+            "Do not say the user has a pain or condition unless it is listed or stated.")
+
+
+def _plain_response(session: Session, user_id: str, question: str, answer: str) -> dict:
+    _save_chat_log(session, user_id, question, answer)
+    return {
+        "referred": False, "message": None, "answer": answer,
+        "needs_condition_selection": False, "condition_options": None,
+        "needs_escalation_confirmation": False, "escalation_proposal": None,
+        "needs_program_update_confirmation": False, "suggested_activities": None,
+        "needs_revert_confirmation": False, "revert_candidates": None,
+        "quota": remaining_quota(session, user_id),
+    }
+
+
+def _conversation_answer(session: Session, user_id: str, question: str, api_key: str) -> dict:
+    """Chat / memory route: answered from the user's past chat only (no notes search, no exercise button, no doctor note)."""
+    if v2.enabled() and v2.is_greeting_or_intro(question):
+        _mem = "Past conversation: not needed for this message."              # a greeting or a name must not bring up old topics
+    else:
+        _mem = _memory_context_block(session, user_id)
+    messages = [{"role": "system", "content": chat_prompts.SHORT_SYSTEM_PROMPT + chat_prompts.CONVERSATION_RULE},
+                {"role": "user", "content": f"{_mem}\n\nQuestion: {question}"}]
+    raw = vectorstore.chat_complete(messages, api_key)
+    match = SUGGESTED_EXERCISES_MARKER.search(raw)
+    answer = (raw[:match.start()] if match else raw).strip()
+    low = answer.lower()
+    if low.startswith(chat_messages.NO_INFO.lower()[:60]):
+        answer = chat_messages.NO_INFO
+    elif any(k in low for k in chat_prompts.LEAK_MARKERS):
+        answer = NO_CONTENT_ANSWER
+    elif len(answer) < 3:
+        raise UpstreamUnavailable("chat model returned an unusable answer")
+    if v2.enabled():
+        answer = v2.strip_offers(answer)
+    return _plain_response(session, user_id, question, _enforce_no_medication_or_surgery(answer))
+
+
+def _targets_answer(session: Session, user_id: str, question: str) -> dict:
+    """Reps / sets / targets route: built from the user's own program rows (no AI call)."""
+    rows = session.execute(
+        select(ActivityTaxonomy.display_name, UserProgram.status, UserProgram.target_sets, UserProgram.target_amount, UserProgram.unit,
+               UserProgram.set_targets, UserProgram.auto_progress)
+        .join(ActivityTaxonomy, ActivityTaxonomy.activity_type == UserProgram.activity_type)
+        .where(UserProgram.user_id == user_id).order_by(ActivityTaxonomy.display_name)).all()
+    names = [r[0] for r in rows] or [n for (n,) in session.execute(select(ActivityTaxonomy.display_name)).all()]
+    asked = chat_rules.exercise_named(question, names)
+    if asked is None and v2.enabled():                           # "how long should I walk?": "walk" names Walking
+        _hits = [n for n in names if v2.question_names(question, n)]
+        if len(_hits) == 1:
+            asked = _hits[0]
+    # a short follow-up like "how many reps?" uses the exercise the last exchange was about; a long or general question never borrows an old one ("how many push ups ...")
+    if asked is None and not (v2.enabled() and (v2.wants_all_targets(question) or len(question.split()) > 4)):
+        prev = _recent_full_exchanges(session, user_id, limit=1)
+        if prev:
+            asked = chat_rules.exercise_named(prev[0].question, names) or chat_rules.exercise_named(prev[0].answer, names)
+    return _plain_response(session, user_id, question, targets_answer.answer([tuple(r) for r in rows], asked))
+
+
+def _v2_rule_response(session: Session, user_id: str, question: str, rr: dict) -> dict | None:
+    """PIPELINE V2 code rules on the router's answer (fixed messages, no answer call): "I am healthy now" and data the app does not track."""
+    if rr.get("intent") == "remove_exercise":
+        return _plain_response(session, user_id, question, v2.REMOVE_MESSAGE)
+    if rr.get("intent") == "set_target":
+        return _plain_response(session, user_id, question, v2.SET_TARGET_MESSAGE)
+    if rr.get("claims_healthy"):
+        labels = _existing_condition_labels(session, user_id)
+        if labels:
+            return _plain_response(session, user_id, question, v2.healthy_message(labels))
+    if rr.get("unsupported_data") and v2.mentions_untracked(question):
+        return _plain_response(session, user_id, question, v2.UNSUPPORTED_MESSAGE)
+    return None
+
+
+def _memory_questions_block(session: Session, user_id: str) -> str:
+    """Only what the USER wrote earlier (their name, their symptoms), never the old answers: old progress numbers and advice must not leak into an unrelated reply."""
+    recent = _recent_full_exchanges(session, user_id)
+    if not recent:
+        return "Past conversation: none yet - this is the first exchange."
+    return "The user's own earlier messages (for their name and context only, never for facts):\n" + "\n".join(f"- {r.question}" for r in recent)
+
+
+def _routine_or_avoid_answer(session: Session, user_id: str, question: str, condition_codes: list[str]) -> dict | None:
+    """'give me a routine for the week' and 'what should I avoid?': built in code from the audited table row (its cautions) and the user's own targets. No invented numbers."""
+    want_avoid, want_routine = v2.asks_what_to_avoid(question), v2.asks_routine(question)
+    if not (want_avoid or want_routine) or exercise_table.gate(condition_codes):
+        return None
+    row = exercise_table.row_for(condition_codes)
+    if not row:
+        return None
+    cautions = v2.clean_cautions(row.get("row_caution", ""))
+    approved = exercise_table.approved_names(condition_codes)
+    _blocked = _blocked_named(session, question, approved) if want_routine else []                  # "a running routine" when running is blocked: say so, never silently leave it out
+    _lead = (v2.blocked_protocol("recommend", _blocked[0], _existing_condition_labels(session, user_id), []) + "\n\nHere is a week with the exercises I can suggest for you.\n\n") if _blocked else ""
+    if want_avoid:
+        return _plain_response(session, user_id, question, v2.avoid_text(cautions, approved))
+    rows = session.execute(
+        select(ActivityTaxonomy.display_name, UserProgram.status, UserProgram.target_sets, UserProgram.target_amount, UserProgram.unit, UserProgram.set_targets, UserProgram.auto_progress)
+        .join(ActivityTaxonomy, ActivityTaxonomy.activity_type == UserProgram.activity_type)
+        .where(UserProgram.user_id == user_id, UserProgram.status == "active")).all()
+    by_name = {r[0]: r for r in rows}
+    items = []
+    for name in approved:
+        r = by_name.get(name)
+        if r:
+            items.append(targets_answer.one(r[0], r[2], r[3], r[4], r[5], r[6]).strip())
+    if not items:
+        return None
+    return _plain_response(session, user_id, question, _lead + v2.weekly_routine(items, cautions))
+
+
+def _increase_target_answer(session: Session, user_id: str, question: str, api_key: str) -> dict:
+    """'can I increase my target? by how much?': answered from the user's real adherence numbers. Eligible (adherence 100% or more, not declining, no plateau, safe for the
+    user's conditions) -> the offer and the confirm button; otherwise a plain 'not yet' with the numbers."""
+    entries = session.execute(
+        select(UserProgram.activity_type, ActivityTaxonomy.display_name).join(ActivityTaxonomy, ActivityTaxonomy.activity_type == UserProgram.activity_type)
+        .where(UserProgram.user_id == user_id, UserProgram.status == "active").order_by(ActivityTaxonomy.display_name)).all()
+    if not entries:
+        return _plain_response(session, user_id, question, "You don't have any active exercises yet, so there is nothing to increase.")
+    lines, payload = [], None
+    for at, dn in entries:
+        adh = progression_analysis._check_adherence_trend(session, user_id, at)
+        plat = progression_analysis._check_plateau(session, user_id, at)
+        if adh.get("value") is None:
+            lines.append(f"- {dn}: no weekly history yet")
+            continue
+        gate = progression_analysis._condition_gate(session, user_id, at)
+        why = []
+        if adh["value"] < 100:
+            why.append(f"adherence {adh['value']}% (an increase needs 100% or more)")
+        if adh.get("trend") == "declining":
+            why.append("adherence is declining")
+        if plat.get("detected"):
+            why.append("your progress has plateaued")
+        if not gate["safe"]:
+            why.append("not safe to raise for your conditions")
+        if not why and payload is None:
+            proposal = progression_analysis._escalation_proposal(adh, plat, gate, api_key=api_key)
+            payload = _escalation_confirmation_payload(at, dn, {"escalation_proposal": proposal, "findings": [adh]})
+        lines.append(f"- {dn}: " + ("ready for an increase" if not why else "; ".join(why)))
+    if payload:
+        text = payload["prompt_text"] + " Tap the button below to confirm.\n\nYour other exercises:\n" + "\n".join(l for l in lines if payload["display_name"] not in l)
+    else:
+        text = ("Not yet. A target is raised when adherence is 100% or more and not declining. Right now:\n" + "\n".join(lines)
+                + "\n\nYour targets also go up automatically every week when you complete them.")
+    resp = _plain_response(session, user_id, question, text)
+    if payload:
+        resp["needs_escalation_confirmation"], resp["escalation_proposal"] = True, payload
+    return resp
+
+
+def _fast_add_reply(session: Session, user_id: str, question: str) -> dict | None:
+    """A short message that is only "add <exercise>": answered by the add route directly, with no embedding check, urgent AI check, router or daily question."""
+    prev = _recent_full_exchanges(session, user_id, limit=1)
+    if prev and v2.is_choice_followup(question) and prev[-1].answer.startswith("Which one do you mean: "):
+        _names = [n.strip() for n in prev[-1].answer[len("Which one do you mean: "):].rstrip("? ").split(",") if n.strip()]
+        if _names:
+            new_flow._bump_free_counter(sys.modules[__name__], user_id)
+            return _add_exercise_answer(session, user_id, question, {"exercise": " and ".join(_names)})
+    name_text = v2.fast_add_name(question)
+    if not name_text:
+        return None
+    catalog = {at: {"name": n, "synonyms": list(syn or [])}
+               for at, n, syn in session.execute(select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name, ActivityTaxonomy.synonyms)).all()}
+    if not all(v2.match_exercises(part, catalog) for part in v2.split_exercise_parts(name_text)):
+        return None
+    new_flow._bump_free_counter(sys.modules[__name__], user_id)
+    return _add_exercise_answer(session, user_id, question, {"exercise": name_text})
+
+
+def _add_exercise_answer(session: Session, user_id: str, question: str, rr: dict) -> dict:
+    """PIPELINE V2 "add this exercise" route (code only, no answer call). The router names the exercise (or, for "add that", the previous answer does);
+    the audited table decides if it is approved; the user's program row says if it is already in or paused. Approved and new/paused -> Add button."""
+    codes = list(session.scalars(select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all())
+    catalog = {at: {"name": n, "synonyms": list(syn or [])}
+               for at, n, syn in session.execute(select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name, ActivityTaxonomy.synonyms)).all()}
+    names = {at: i["name"] for at, i in catalog.items()}
+    reason = exercise_table.gate(codes)
+    if reason:
+        _gm = chat_messages.gate_message(reason, len([c for c in codes if c != "none"]))
+        return _plain_response(session, user_id, question, v2.gate_message_named(reason, _existing_condition_labels(session, user_id), _gm))
+    _extra = exercise_table.allowed_types(codes) - exercise_table.approved_types(codes)       # not `avoid` in the audited table (safe, or modify = with caution): fine when the user asks to add it
+    approved_names = exercise_table.approved_names(codes) + [names[a] for a in sorted(_extra) if a in names]
+    approved_types = exercise_table.approved_types(codes) | _extra
+    status = dict(session.execute(select(UserProgram.activity_type, UserProgram.status).where(UserProgram.user_id == user_id)).all())
+    raw = (rr.get("exercise") or "").strip()
+    _multi = False
+    if raw:
+        parts = v2.split_exercise_parts(raw)
+        if len(parts) > 1:                                                          # "running and ankle circles": every part must name exactly one exercise
+            found = []
+            for _p in parts:
+                _f = v2.match_exercises(_p, catalog)
+                if len(_f) != 1:
+                    found, raw = (_f if len(_f) > 1 else []), _p
+                    break
+                found.extend(_f)
+            else:
+                found, _multi = list(dict.fromkeys(found)), True
+        else:
+            found = v2.match_exercises(raw, catalog)
+        if not found:
+            _did = v2.suggest_exercise(raw, catalog)
+            if _did:
+                return _plain_response(session, user_id, question, f'I couldn\'t find "{raw[:40]}". Did you mean {_did}? Type "add {_did.lower()}" to add it.')
+            return _plain_response(session, user_id, question, v2.not_in_app_message(raw, approved_names))
+        if len(found) > 1 and not _multi:                                           # "stretch", "circles": ask which one, never pick the first
+            return _plain_response(session, user_id, question, v2.AMBIGUOUS_EXERCISE.format(names=", ".join(names[a] for a in found)))
+        targets = found
+    else:                                                                       # "add that / add these": the exercises the previous answer named
+        prev = _recent_full_exchanges(session, user_id, limit=1)
+        text = prev[0].answer if prev else ""
+        targets = [at for at, n in names.items() if v2.mentioned(text, n)]
+        if not targets:
+            return _plain_response(session, user_id, question, v2.ASK_WHICH_EXERCISE.format(names=", ".join(approved_names)))
+    ok = [a for a in targets if a in approved_types]
+    if not ok:
+        return _plain_response(session, user_id, question, v2.not_approved_message(", ".join(names[a] for a in targets), approved_names, _existing_condition_labels(session, user_id)))
+    already = [a for a in ok if status.get(a) == "active"]
+    resume = [a for a in ok if a in status and status[a] != "active"]
+    offer = [a for a in ok if a not in already]
+    message = v2.add_message([names[a] for a in offer], [names[a] for a in resume], [names[a] for a in already])
+    _modify = [a for a in offer if exercise_table.verdict_for(codes, a) == "modify"]
+    if _modify:                                                                  # allowed with caution: say so, with the table's own words
+        _row = exercise_table.row_for(codes) or {}
+        message += v2.add_caution([names[a] for a in _modify], {names[a]: exercise_table.caution_for(codes, a) for a in _modify}, v2.clean_cautions(_row.get("row_caution", "")))
+    _bad = [a for a in targets if a not in approved_types]
+    if _bad:
+        message += " " + v2.not_approved_note([names[a] for a in _bad], _existing_condition_labels(session, user_id))
+    if not offer:
+        return _plain_response(session, user_id, question, message)
+    _save_chat_log(session, user_id, question, message)
+    return {
+        "referred": False, "message": None, "answer": message,
+        "needs_condition_selection": False, "condition_options": None,
+        "needs_escalation_confirmation": False, "escalation_proposal": None,
+        "needs_program_update_confirmation": True,
+        "suggested_activities": [{"activity_type": a, "display_name": names[a]} for a in offer],
+        "program_update_mode": "add", "program_update_modes": ["add"],
+        "needs_revert_confirmation": False, "revert_candidates": None,
+        "quota": remaining_quota(session, user_id),
+    }
+
+
+def _program_performance_context(session: Session, user_id: str, question: str, *, openrouter_api_key: str) -> tuple[str | None, dict | None]:
+    """PIPELINE V2 progress route: the numbers for EVERY active exercise in the program (code, no AI), so the answer covers the whole program. A question that
+    names one exercise keeps the single-exercise analysis (and its "increase your target" offer). The offer for the whole-program summary is made for the
+    first exercise that is eligible."""
+    entries = session.execute(
+        select(UserProgram.activity_type, ActivityTaxonomy.display_name, ActivityTaxonomy.synonyms)
+        .join(ActivityTaxonomy, ActivityTaxonomy.activity_type == UserProgram.activity_type)
+        .where(UserProgram.user_id == user_id, UserProgram.status == "active").order_by(ActivityTaxonomy.display_name)).all()
+    if not entries:
+        return None, None
+    lowered = question.lower()
+    if any(any(n and n in lowered for n in {dn.lower(), *((x or "").lower() for x in (syn or []))}) for _at, dn, syn in entries):
+        return _performance_context(session, user_id, question, openrouter_api_key=openrouter_api_key)
+    lines, payload = [], None
+    for at, dn, _syn in entries:
+        adh = progression_analysis._check_adherence_trend(session, user_id, at)
+        plat = progression_analysis._check_plateau(session, user_id, at)
+        curve = progression_analysis._check_vs_curve(session, user_id, at)
+        if adh.get("available") is False:
+            text = "no weekly history yet"
+        else:
+            text = f"adherence {adh.get('value')}% over the last {adh.get('window_weeks')} weeks" + (f" ({adh['trend']})" if adh.get("trend") else "")
+        text += "; plateau detected" if plat.get("detected") else "; no plateau"
+        if curve.get("available") is not False and "applied_pct" in curve:
+            text += f"; last weekly change applied {curve['applied_pct']}% vs {curve['predicted_pct']}% predicted"
+        lines.append(f"- {dn}: {text}")
+        if payload is None and adh.get("value") is not None:
+            gate = progression_analysis._condition_gate(session, user_id, at)
+            if gate["safe"] and not plat.get("detected") and adh.get("value", 0) >= 100 and adh.get("trend") != "declining":
+                proposal = progression_analysis._escalation_proposal(adh, plat, gate, api_key=openrouter_api_key)
+                payload = _escalation_confirmation_payload(at, dn, {"escalation_proposal": proposal, "findings": [adh]})
+    streak = progression_analysis._check_streak(session, user_id)
+    block = ("Program data for ALL of the user's active exercises (from the app's own tracking, not retrieved medical text). Summarise EVERY exercise listed below in one short "
+             "line each, with its percentages. Never say there is no data for an exercise that is listed. Discomfort is not tracked yet.\n" + "\n".join(lines)
+             + f"\nOverall: current streak {streak['current']} day(s), {streak['active_days']} active days in total.")
+    return block, payload
 
 
 def _classify_condition(question: str, options: list[dict], existing_labels: list[str],
@@ -1220,7 +1599,7 @@ def _performance_context(session: Session, user_id: str, question: str, *,
 
 def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_db_url: str,
                           openrouter_api_key: str, rlm_enabled: bool = True,
-                          charged: bool = True) -> dict:
+                          charged: bool = True, urgent_unavailable: bool = False, router_result: dict | None = None) -> dict:
     """Quota is consumed once, unconditionally, by answer_query before this
     is ever called (product decision, found live in a code audit: every
     real message now counts, no matter which path it takes) — this function
@@ -1232,6 +1611,9 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
     ).all())
     escalation_confirmation = None
     suggested_activities = []
+    v2_modes = None                                              # V2: which chips to offer; None = Add and Switch
+    use_new = new_flow.enabled()
+    gate_reason = None
 
     try:
         # A single LLM classification decides activity_recall / performance /
@@ -1241,11 +1623,30 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
         # my growth" pulling in 5 low-relevance osteoporosis chunks) that
         # irrelevant "Retrieved information" text makes the model latch onto
         # rule 4 and decline, ignoring real app data it was also given.
-        intent = (
-            _classify_data_intent(session, user_id, question,
-                                   api_key=openrouter_api_key, today=today_ist())
-            if rlm_enabled else {"intent": "medical", "start_date": None, "end_date": None}
-        )
+        if use_new and new_flow.router_enabled() and rlm_enabled and router_result is None:
+            router_result = _run_router(session, user_id, question, openrouter_api_key)      # e.g. after a condition-button tap
+        use_router = use_new and new_flow.router_enabled() and router_result is not None
+        if not rlm_enabled:
+            intent = {"intent": "medical", "start_date": None, "end_date": None}
+        elif use_router:
+            intent = _intent_from_router(session, user_id, question, router_result)
+        else:
+            intent = _classify_data_intent(session, user_id, question, api_key=openrouter_api_key, today=today_ist())
+
+        if use_router and intent["intent"] == "conversation":
+            return _conversation_answer(session, user_id, question, openrouter_api_key)
+        if use_router and intent["intent"] == "program_targets":
+            return _targets_answer(session, user_id, question)
+        if use_router and v2.enabled() and intent["intent"] == "out_of_scope":
+            return _plain_response(session, user_id, question, v2.OUT_OF_SCOPE_MESSAGE)
+        if use_router and v2.enabled() and intent["intent"] == "add_exercise":
+            return _add_exercise_answer(session, user_id, question, router_result)
+        if use_router and v2.enabled() and intent["intent"] == "increase_target":
+            return _increase_target_answer(session, user_id, question, openrouter_api_key)
+        if use_router and v2.enabled() and intent["intent"] == "medical":
+            _fixed = _routine_or_avoid_answer(session, user_id, question, condition_codes)
+            if _fixed is not None:
+                return _fixed
 
         if intent["intent"] == "activity_recall":
             # Bypasses the answer-writing LLM entirely, not just the medical
@@ -1274,15 +1675,18 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             # Same reasoning as activity_recall just above: this is a literal
             # database lookup ("what did a previous sport suggestion hide?"),
             # not a synthesis task — no need for the answer-writing LLM at all.
-            hidden = _hidden_by_sport_focus_change(session, user_id)
-            answer = (
-                "You don't have any recently changed exercises to revert — your "
-                "program hasn't been updated by a sport suggestion recently."
-                if not hidden else
-                "Here's what changed recently: "
-                + ", ".join(h["display_name"] for h in hidden)
-                + ". Want to bring these back?"
-            )
+            hidden = _revert_candidates(session, user_id)
+            _back = [h["display_name"] for h in hidden if h["action"] == "restore"]
+            _paused = [h["display_name"] for h in hidden if h["action"] == "pause"]
+            if not hidden:
+                answer = ("You don't have any recently changed exercises to revert — your "
+                          "program hasn't been updated by a sport suggestion recently.")
+            elif not _paused:
+                answer = "Here's what changed recently: " + ", ".join(_back) + ". Want to bring these back?"
+            else:
+                answer = ("Here's what changed recently. I can bring back " + ", ".join(_back) + " and take out "
+                          if _back else "Here's what changed recently. I can take out ") + ", ".join(_paused) \
+                    + (" (the switch added " + ("it" if len(_paused) == 1 else "them") + "). Want me to put your plan back as it was?")
             _save_chat_log(session, user_id, question, answer)
             return {
                 "referred": False, "message": None, "answer": answer,
@@ -1293,10 +1697,19 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
                 "quota": remaining_quota(session, user_id),
             }
 
-        performance_block, escalation_confirmation = (
-            _performance_context(session, user_id, question, openrouter_api_key=openrouter_api_key)
-            if intent["intent"] == "performance" else (None, None)
-        )
+        if intent["intent"] == "performance" and use_router and v2.enabled():
+            _paused = session.execute(
+                select(ActivityTaxonomy.display_name).join(UserProgram, UserProgram.activity_type == ActivityTaxonomy.activity_type)
+                .where(UserProgram.user_id == user_id, UserProgram.status != "active")).scalars().all()
+            _hit = next((n for n in _paused if v2.question_names(question, n)), None)
+            if _hit:
+                return _plain_response(session, user_id, question, v2.paused_message(_hit))
+            performance_block, escalation_confirmation = _program_performance_context(session, user_id, question, openrouter_api_key=openrouter_api_key)
+        else:
+            performance_block, escalation_confirmation = (
+                _performance_context(session, user_id, question, openrouter_api_key=openrouter_api_key)
+                if intent["intent"] == "performance" else (None, None)
+            )
         app_data_block = performance_block
         chunks = (
             [] if app_data_block is not None else
@@ -1311,6 +1724,13 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
         # match the same as no match at all, rather than handing the model
         # low-relevance content and hoping it independently notices none of
         # it actually answers the question (see RELEVANCE_THRESHOLD's comment).
+        if use_new and app_data_block is None and (not chunks or chunks[0]["similarity"] < vectorstore.RELEVANCE_THRESHOLD):
+            # weak first search (typical for Hinglish): try again with an English rewrite of the question and keep the better result
+            _en = (router_result or {}).get("search_query") or new_flow.english_search_query(question, openrouter_api_key)
+            if _en and _en.lower() != question.lower():
+                _alt = vectorstore.retrieve_chunks(_en, condition_codes, rag_db_url=rag_db_url, api_key=openrouter_api_key)
+                if _alt and (not chunks or _alt[0]["similarity"] > chunks[0]["similarity"]):
+                    chunks = _alt
         if chunks and chunks[0]["similarity"] < vectorstore.RELEVANCE_THRESHOLD:
             chunks = []
         # A performance or activity-recall question legitimately has nothing in
@@ -1319,6 +1739,8 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
         # user's own tracked data (rules 9-10 above carve out this exception).
         if not chunks and app_data_block is None:
             answer = NO_CONTENT_ANSWER
+            if use_new:
+                new_flow.record_async(question, openrouter_api_key)      # learn the words behind this refusal (background; the answer never waits)
         else:
             # No "Retrieved information" section at all when answering from
             # the user's own data — even a "(nothing relevant found)"
@@ -1332,23 +1754,50 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
                    "(no directly relevant medical information retrieved for this question)")
                 + "\n\n"
             )
-            approved = _approved_activities(session, condition_codes)
-            approved_block = (
-                "Approved exercises for this condition (with what each helps with): "
-                + ", ".join(f"{name} ({ACTIVITY_CATEGORIES.get(name, 'general movement')})"
-                            for name in approved)
-                if approved else
-                "Approved exercises for this condition: none listed."
-            )
-            memory_block = _memory_context_block(session, user_id)
+            # NEW PIPELINE, medical answers only (progress / data answers keep the old prompt and list): the approved exercises come from the audited
+            # 794-row table for the user's saved conditions, best first, with cautions; the answer prompt is the short one with the reply-language rule.
+            medical_new = use_new and app_data_block is None
+            v2_on = use_router and v2.enabled()
+            want_ideas = False
+            if medical_new:
+                if not exercise_table.get().rows:
+                    raise UpstreamUnavailable("exercise table could not be loaded")      # a SYSTEM problem: refund + "try again", never a medical refusal
+                approved, approved_block, gate_reason = new_flow.medical_setup(condition_codes, ACTIVITY_CATEGORIES)
+                want_ideas = bool(v2_on and not gate_reason and router_result.get("wants_exercises") and (router_result.get("sport") or (router_result.get("add_mode") == "add" and v2.asks_for_more(question))))
+                if v2_on and not gate_reason and router_result.get("sport"):
+                    _blocked = _blocked_named(session, router_result["sport"], approved)
+                    if _blocked:
+                        return _plain_response(session, user_id, question, v2.blocked_protocol("recommend", _blocked[0], _existing_condition_labels(session, user_id), approved))
+            else:
+                approved = _approved_activities(session, condition_codes)
+                approved_block = (
+                    "Approved exercises for this condition (with what each helps with): "
+                    + ", ".join(f"{name} ({ACTIVITY_CATEGORIES.get(name, 'general movement')})"
+                                for name in approved)
+                    if approved else
+                    "Approved exercises for this condition: none listed."
+                )
+            memory_block = _memory_questions_block(session, user_id) if v2_on else _memory_context_block(session, user_id)
             performance_part = f"{app_data_block}\n\n" if app_data_block else ""
+            _player = (program_agent.read(session, user_id, _allowed_names(session, condition_codes))
+                       if v2_on and medical_new and not gate_reason and (router_result.get("wants_exercises") or want_ideas) else None)      # PROGRAM AGENT: only for exercise requests
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": (chat_prompts.SHORT_SYSTEM_PROMPT + (v2.V2_RULES if v2_on else "") + (v2.OTHER_IDEAS_RULE if want_ideas else "")) if medical_new else SYSTEM_PROMPT},
                 {"role": "user",
                  "content": f"{retrieved_part}{approved_block}\n\n"
-                            f"{performance_part}{memory_block}\n\nQuestion: {question}"},
+                            + (f"Saved conditions of this user: {', '.join(_existing_condition_labels(session, user_id)) or 'none'}. "
+                               f"Mention only a pain or condition listed here or stated in the user's own message.\n\n" if v2_on else "")
+                            + (program_agent.block(_player) + "\n\n" if _player is not None else "")
+                            + f"{performance_part}{memory_block}\n\nQuestion: {question}"
+                            + (_sport_instruction(router_result, approved) if v2_on and medical_new and router_result.get("sport") else "")
+                            + (f"\n\n{chat_prompts.reply_language_line(question)}" if medical_new else "")},
             ]
             raw_answer = vectorstore.chat_complete(messages, openrouter_api_key)
+            other_ideas: list[str] = []
+            if v2_on:
+                raw_answer, other_ideas = v2.split_other_ideas(raw_answer)              # the hidden OTHER_IDEAS line never reaches the user as text
+                if not want_ideas:
+                    other_ideas = []
             # Peel rule 11's marker line off BEFORE any safety backstop or the
             # user ever sees the text — it's for this app to read, never part
             # of the visible answer, and leaving it in would let a stray
@@ -1357,8 +1806,33 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             answer, suggested_activities = _extract_suggested_exercises(
                 session, raw_answer, approved
             )
+            if medical_new:
+                _low = answer.lower()
+                if _low.lstrip().startswith(chat_messages.NO_INFO.lower()[:60]):
+                    answer, suggested_activities = chat_messages.NO_INFO, []         # the model refused an override attempt: show only the standard refusal
+                elif any(k in _low for k in chat_prompts.LEAK_MARKERS):
+                    answer, suggested_activities = NO_CONTENT_ANSWER, []             # prompt text leaked into the reply: never show it
+                elif len(answer.strip()) < 40:
+                    raise UpstreamUnavailable("chat model returned an unusable answer")   # garbage reply: refund + "try again", never shown
             answer = _enforce_no_medication_or_surgery(answer)
-            answer, was_corrected = _enforce_approved_exercises_only(session, answer, approved)
+            if v2_on:
+                _catalog = list(session.execute(select(ActivityTaxonomy.display_name)).scalars().all())
+                _allowed = list(approved)
+                if app_data_block is not None:                                          # progress answers may name the exercises already in the user's program
+                    _allowed += [n for (n,) in session.execute(
+                        select(ActivityTaxonomy.display_name).join(UserProgram, UserProgram.activity_type == ActivityTaxonomy.activity_type)
+                        .where(UserProgram.user_id == user_id)).all()]
+                _before_cut = answer
+                answer, _offending = v2.cut_unapproved(answer, _catalog, _allowed)
+                was_corrected = False
+                _asked = next((n for n in _offending if v2.question_names(question, n)), None)
+                if _offending and (_asked or len(answer) < 80 or len(answer) < 0.35 * len(_before_cut)):
+                    # the user ASKED about an unapproved exercise: say so plainly. Otherwise (a sport or a general question where the model drifted into one) keep the answer
+                    # unless the cut left only a fragment, and then show what can be suggested instead of a gutted text or an irrelevant "can't recommend X".
+                    answer = v2.fallback_after_cut([_asked], approved, _existing_condition_labels(session, user_id)) if _asked else v2.fallback_generic(approved)
+                    was_corrected = True
+            else:
+                answer, was_corrected = _enforce_approved_exercises_only(session, answer, approved)
             # Drives the "add these suggested exercises to your program?"
             # confirmation (found live: a user wanted a one-tap way to
             # actually add exercises the chat just suggested, not just read
@@ -1374,6 +1848,51 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             # docstring) over a safety correction, not a recommendation.
             if was_corrected:
                 suggested_activities = []
+            if medical_new and gate_reason:
+                # this set of conditions has no verified exercises: the notes-based answer stays, no exercise is offered, and the doctor message is added
+                if use_router:
+                    _gm = chat_messages.gate_message(gate_reason, len([c for c in condition_codes if c != "none"]))
+                    if v2_on:
+                        _gm = v2.gate_message_named(gate_reason, _existing_condition_labels(session, user_id), _gm)
+                    answer = chat_rules.join_refusal(answer, _gm)
+                else:
+                    answer = answer.rstrip() + "\n\n" + chat_messages.refusal_message(gate_reason)
+                suggested_activities = []
+            if use_router and suggested_activities and not chat_rules.button_allowed(
+                    router_result["wants_exercises"], answer, [a["display_name"] for a in suggested_activities]):
+                suggested_activities = []                       # an information, medicine or yes/no answer: no add-exercises button
+            if v2_on and len(suggested_activities) == 1 and not router_result.get("sport") and not v2.is_recommendation(answer):
+                suggested_activities = []                       # an explanation of one exercise is not a recommendation
+            if v2_on and suggested_activities:
+                _active = set(session.scalars(select(UserProgram.activity_type).where(UserProgram.user_id == user_id, UserProgram.status == "active")).all())
+                if _active == {a["activity_type"] for a in suggested_activities}:
+                    suggested_activities = []                       # the program already is exactly this: nothing to add and nothing to switch
+                elif all(a["activity_type"] in _active for a in suggested_activities):
+                    # everything suggested is already in the program: "Add" would change nothing
+                    if v2.asks_for_more(question):
+                        suggested_activities = []
+                    else:
+                        v2_modes = ["switch"]
+            if v2_on:
+                answer = v2.clean_wording(answer)                  # no 'approved exercise list' / 'retrieved information' in the user's text
+                answer = v2.strip_offers(answer)                   # no "Would you like me to set reminders?": the app cannot do it
+            if _player is not None and not was_corrected:
+                _before = len(suggested_activities)
+                _note, suggested_activities = program_agent.note(_player, suggested_activities)
+                if _note:
+                    answer = answer.rstrip() + "\n\n" + _note
+                if suggested_activities and len(suggested_activities) < _before:
+                    v2_modes = ["add"]                              # some are already in the player: only ADD makes sense (Switch would pause what the user keeps)
+            if other_ideas and not was_corrected and not answer.lower().lstrip().startswith(chat_messages.NO_INFO.lower()[:40]):
+                _avoid_types = _avoided_activity_types(session, condition_codes)
+                _avoid_names = ([n for (n,) in session.execute(select(ActivityTaxonomy.display_name).where(ActivityTaxonomy.activity_type.in_(_avoid_types))).all()]
+                                if _avoid_types else [])
+                _ideas = v2.filter_ideas(other_ideas, approved_names=approved, avoided_names=_avoid_names,
+                                         catalog_names=list(session.execute(select(ActivityTaxonomy.display_name)).scalars().all()), condition_codes=condition_codes)
+                if _ideas:
+                    answer = answer.rstrip() + "\n\n" + v2.other_ideas_block(_ideas)
+            if use_new and urgent_unavailable:
+                answer += chat_messages.UNAVAILABLE_NOTE
 
             # Tag this exchange's memory row by what it was actually RETRIEVED as
             # being about, not by the user's onboarded condition_codes. Those two
@@ -1394,7 +1913,8 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             extracted = _save_memory(session, user_id, retrieved_topics, question, answer, openrouter_api_key)
             total_persisting = past_persisting + (1 if extracted and extracted["pain_persisting"] else 0)
             if total_persisting >= PAIN_PERSISTING_THRESHOLD:
-                answer += DOCTOR_ESCALATION_NOTE.format(n=total_persisting)
+                if not use_router or (extracted and extracted["pain_persisting"] and not _note_shown_today(session, user_id)):
+                    answer += DOCTOR_ESCALATION_NOTE.format(n=total_persisting)
     except RuntimeError as exc:
         # Found live (third-pass code audit): this used to catch only
         # UpstreamUnavailable. chat_complete/vectorstore also raise the
@@ -1427,11 +1947,13 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             # inverting the bug instead of fixing it. Commit the refund before
             # raising so the user doesn't lose a real question to an infra hiccup.
             session.commit()
-        raise RateLimited(
-            "The guidance service is busy right now. Please try again in a moment — "
-            "this attempt was not counted against your daily questions.",
-            retry_after=30,
-        )
+        _busy = ("The guidance service is busy right now. Please try again in a moment — "
+                 "this attempt was not counted against your daily questions.")
+        if use_new:
+            _ref = chat_messages.new_error_ref()
+            chat_messages.log_system_error(_ref, type(exc).__name__, "chat", exc)
+            _busy += f" (If it keeps happening, quote this reference: {_ref})"
+        raise RateLimited(_busy, retry_after=30)
 
     # The transcript the user actually sees — including the escalation note, if
     # one got appended above, since that's genuinely what happened in this
@@ -1445,6 +1967,8 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
         "escalation_proposal": escalation_confirmation,
         "needs_program_update_confirmation": bool(suggested_activities),
         "suggested_activities": suggested_activities or None,
+        "program_update_mode": "switch" if v2_modes == ["switch"] else ("add" if (v2_modes == ["add"] or router_result and router_result.get("add_mode") == "add" and (not v2.enabled() or v2.asks_for_more(question))) else "switch"),
+        **({"program_update_modes": v2_modes or ["add", "switch"]} if (use_router and v2.enabled() and suggested_activities) else {}),      # V2: the user chooses; Add first (changes nothing else)
         "needs_revert_confirmation": False, "revert_candidates": None,
         "quota": remaining_quota(session, user_id),
     }
@@ -1568,7 +2092,13 @@ def _confirm_program_update(session: Session, user_id: str, confirmation: dict) 
     # tests/test_rag_program_confirmation.py, which pins this behaviour.
     # (_confirm_revert intentionally differs: its candidates are the user's
     # OWN previously-active entries, which legitimately include `modify`.)
-    approved_types = _approved_activity_types(session, condition_codes)
+    if new_flow.enabled():
+        approved_types = (set() if exercise_table.gate(condition_codes) else
+                          exercise_table.approved_types(condition_codes) - _avoided_activity_types(session, condition_codes))
+    else:
+        approved_types = _approved_activity_types(session, condition_codes)
+    if v2.enabled() and confirmation.get("mode") == "add" and not exercise_table.gate(condition_codes):
+        approved_types = approved_types | (exercise_table.allowed_types(condition_codes) - _avoided_activity_types(session, condition_codes))
     safe_types = [a for a in activity_types if a in approved_types]
     if not safe_types:
         return {
@@ -1576,7 +2106,7 @@ def _confirm_program_update(session: Session, user_id: str, confirmation: dict) 
             "message": "None of those exercises are currently approved for you — nothing changed.",
         }
 
-    result = set_program_to_activities(session, user_id, safe_types)
+    result = set_program_to_activities(session, user_id, safe_types, hide_others=confirmation.get("mode") != "add")
     taxonomy_names = {
         t.activity_type: t.display_name for t in session.scalars(select(ActivityTaxonomy)).all()
     }
@@ -1599,6 +2129,8 @@ def _confirm_program_update(session: Session, user_id: str, confirmation: dict) 
         parts.append(f"Hidden from your program (kept, not deleted — you can add it back "
                       f"any time): {', '.join(hidden_names)}")
     message = "; ".join(parts) if parts else "These were already in your program — nothing to add."
+    if hidden_names and v2.enabled():
+        message += "." + v2.SWITCH_HINT
     return {
         **base_response, "program_updated": True, "message": message,
         "program": result["program"],
@@ -1611,9 +2143,12 @@ def _confirm_revert(session: Session, user_id: str, confirmation: dict) -> dict:
     program change, rather than manually re-adding each exercise on the
     dashboard).
 
-    Purely additive — restores specific hidden entries to active with
-    whatever target they already had, never hides anything else (unlike
-    set_program_to_activities, which replaces the whole active set). Re-
+    Restores specific hidden entries to active with whatever target they
+    already had, and never hides anything else (unlike
+    set_program_to_activities, which replaces the whole active set) - with
+    one exception: an exercise a Switch itself put into the plan is put back
+    to what it was before (removed again, or paused - undo_switch_additions),
+    so the plan returns to exactly what it was before the Switch. Re-
     validates the client-supplied activity_types against what's ACTUALLY
     currently hidden by sport_focus_change for this user (16.3's principle:
     re-verify, don't trust a possibly-stale value the client echoes back) —
@@ -1637,9 +2172,10 @@ def _confirm_revert(session: Session, user_id: str, confirmation: dict) -> dict:
     if not confirmation.get("confirmed"):
         return {**base_response, "message": "No changes made.", "program_updated": False}
 
-    currently_hidden = {h["activity_type"] for h in _hidden_by_sport_focus_change(session, user_id)}
-    candidate_types = [a for a in activity_types if a in currently_hidden]
-    if not candidate_types:
+    _cands = {c["activity_type"]: c["action"] for c in _revert_candidates(session, user_id)}          # re-read from the database, never trusted from the client
+    candidate_types = [a for a in activity_types if _cands.get(a) == "restore"]
+    pause_types = [a for a in activity_types if _cands.get(a) == "pause"]                              # put in by a Switch: back to what they were before it
+    if not candidate_types and not pause_types:
         return {
             **base_response, "program_updated": False,
             "message": "Nothing to revert — those exercises aren't currently hidden.",
@@ -1664,24 +2200,31 @@ def _confirm_revert(session: Session, user_id: str, confirmation: dict) -> dict:
     ).all())
     avoided = _avoided_activity_types(session, condition_codes)
     safe_types = [a for a in candidate_types if a not in avoided]
-    if not safe_types:
+    if candidate_types and not safe_types and not pause_types:
         return {
             **base_response, "program_updated": False,
             "message": "Those exercises are no longer approved for your current conditions — nothing restored.",
         }
 
-    result = restore_program_activities(session, user_id, safe_types)
+    result = restore_program_activities(session, user_id, safe_types) if safe_types else {"restored": [], "program": None}
+    paused_result = undo_switch_additions(session, user_id, pause_types) if pause_types else {"undone": [], "program": None}
     taxonomy_names = {
         t.activity_type: t.display_name for t in session.scalars(select(ActivityTaxonomy)).all()
     }
     restored_names = [taxonomy_names.get(a, a) for a in result["restored"]]
+    paused_names = [taxonomy_names.get(a, a) for a in paused_result["undone"]]
     message = (
         f"Restored: {', '.join(restored_names)}" if restored_names
         else "Nothing to revert — those exercises aren't currently hidden."
     )
+    if paused_names:
+        message = (f"Restored: {', '.join(restored_names)}. " if restored_names else "") + f"Put back as before the switch: {', '.join(paused_names)}."
+        _not_back = [taxonomy_names.get(a, a) for a in candidate_types if a not in safe_types]
+        if _not_back:
+            message += f" Not restored, no longer approved for your current conditions: {', '.join(_not_back)}."
     return {
-        **base_response, "program_updated": bool(restored_names), "message": message,
-        "program": result["program"],
+        **base_response, "program_updated": bool(restored_names or paused_names), "message": message,
+        "program": paused_result["program"] or result["program"],
     }
 
 
@@ -1757,6 +2300,18 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
             "needs_revert_confirmation": False, "revert_candidates": None,
             "quota": remaining_quota(session, user_id),
         }
+
+    # NEW CHAT PIPELINE (NEW_CHAT_PIPELINE=true): the FREE steps (daily limit left, urgent-word rules, dictionary word) run BEFORE the daily question is
+    # charged, so a request they refuse uses none of the 5. See app/rag/new_flow.py. Off by default: the code below is then exactly the old flow.
+    new_pipeline = new_flow.enabled()
+    if new_pipeline and condition_confirmation is None:
+        early = new_flow.early_checks(sys.modules[__name__], session, user_id, question)
+        if early is not None:
+            return early
+        if v2.enabled() and not new_flow.simple_flow():
+            _fast = _fast_add_reply(session, user_id, question)
+            if _fast is not None:
+                return _fast
 
     # Found live (code audit) — explicit product decision closing the gap:
     # EVERY real message now consumes one quota slot immediately,
@@ -1841,6 +2396,20 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
             charged=not already_paid,
         )
 
+    urgent_unavailable = False
+    if new_pipeline:
+        finished, urgent_unavailable = new_flow.paid_checks(sys.modules[__name__], session, user_id, question, openrouter_api_key)
+        if finished is not None:
+            return finished
+
+    router_result = None
+    if new_pipeline and new_flow.router_enabled():
+        router_result = _run_router(session, user_id, question, openrouter_api_key)      # None = fall back to the old separate calls
+        if router_result is not None and v2.enabled():
+            _rule = _v2_rule_response(session, user_id, question, router_result)
+            if _rule is not None:
+                return _rule
+
     # Fresh message: check whether it looks like an undiagnosed symptom
     # description (5.6). Quota for this message was already consumed above,
     # unconditionally, before this point — _classify_condition and
@@ -1851,11 +2420,17 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
     # once it reaches _retrieve_and_answer's own answer attempt below.
     options = _condition_options(session, user_id)
     existing_labels = _existing_condition_labels(session, user_id)
-    matched_code = _classify_condition(question, options, existing_labels, openrouter_api_key)
+    matched_code = (router_result["condition"] if router_result is not None
+                    else _classify_condition(question, options, existing_labels, openrouter_api_key))
     if matched_code:
         matched_code = _demote_if_extended_topic_fits_better(
             question, matched_code, rag_db_url=rag_db_url, api_key=openrouter_api_key,
         )
+    if matched_code and v2.enabled() and matched_code not in exercise_table.IN_TABLE:
+        # A tap SAVES the condition, and a condition outside the audited table blocks every exercise answer afterwards. So the chat never offers to save one: it says
+        # what it could be, that it has no verified exercises for it, and how to add it from the profile if the user really has it.
+        _label = next((o["label"] for o in options if o["code"] == matched_code), matched_code)
+        return _plain_response(session, user_id, question, v2.not_in_table_message(_label))
     if matched_code:
         matched_label = next(o["label"] for o in options if o["code"] == matched_code)
         # This turn charged a slot but returns no answer — mark that the
@@ -1876,6 +2451,7 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
                 "prompt_text": "That sounds like it could be one of these — which fits?",
                 "matched_code": matched_code,
                 "matched_label": matched_label,
+                "description": v2.CONDITION_DESCRIPTIONS.get(matched_code) if v2.enabled() else None,
                 "original_question": question,
             },
             "needs_escalation_confirmation": False, "escalation_proposal": None,
@@ -1887,4 +2463,5 @@ def answer_query(session: Session, user_id: str, question: str, *, rag_db_url: s
     return _retrieve_and_answer(
         session, user_id, question, rag_db_url=rag_db_url,
         openrouter_api_key=openrouter_api_key, rlm_enabled=rlm_enabled,
+        urgent_unavailable=urgent_unavailable, router_result=router_result,
     )

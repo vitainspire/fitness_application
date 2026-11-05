@@ -53,6 +53,14 @@
     </div>
 
     <div class="bg-surface-container-lowest ambient-shadow rounded-2xl p-lg flex flex-col gap-md">
+      <!-- Google sign-in (sign up and sign in are the same button). Hidden until the backend reports a
+           google_client_id in /v1/app/config and Google's script has loaded; email + password stays below. -->
+      <div id="g-wrap" style="display:none" class="flex-col items-center gap-sm">
+        <div id="g-btn"></div>
+        <div class="flex items-center gap-sm w-full text-on-surface-variant text-xs">
+          <div class="flex-1 h-px bg-outline-variant"></div><span>or use email</span><div class="flex-1 h-px bg-outline-variant"></div>
+        </div>
+      </div>
       <div>
         <label class="font-label-bold text-label-bold text-on-surface text-xs">Email</label>
         <input id="a-email" type="email" placeholder="you@example.com" autocomplete="email"
@@ -1505,6 +1513,7 @@
 
 </div><!-- /.mobile-frame -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>
