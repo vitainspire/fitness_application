@@ -56,3 +56,6 @@ Wellness_App_Plan.docx
 create_docx.py
 test_llm.py
 test_tts/
+
+# database dumps - never commit
+*.backup

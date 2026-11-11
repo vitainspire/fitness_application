@@ -31,10 +31,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.catalog.models import ActivityTaxonomy, Condition, SafetyGridCell
+from app.catalog.models import ActivityTaxonomy, Condition
 from app.platform import redis_clients as rc
 from app.platform.errors import Forbidden, QuotaExhausted, RateLimited, ValidationError
 from app.profile.models import ActivityLog, UserCondition, UserProfile, UserProgram
+from app.profile import service as profile_service
 from app.profile.service import (
     IST, REFERRAL_MESSAGE, activity_log_date_bounds, activity_log_detail,
     complete_onboarding, is_referred, restore_program_activities,
@@ -329,71 +330,38 @@ ACTIVITY_CATEGORIES = {
 
 
 def _avoided_activity_types(session: Session, condition_codes: list[str]) -> set[str]:
-    """Anything the grid marks `avoid` for ANY ONE of this user's conditions.
-
-    Found live (code audit): "safe" and "avoid" are not opposites once a user
-    has more than one condition, and the two halves of this app disagreed
-    about which wins. The program side blocks on ANY avoid
-    (profile.service._blocked_activities); the chat side below approved on
-    ANY safe — so an activity that is safe for one of a user's conditions and
-    avoid for another came out APPROVED for the chatbot while being BLOCKED
-    on their dashboard. Real case in the shipped grid: hamstring_stretch is
-    safe for gout and avoid for herniated_disk, so a user with both could be
-    told by the chatbot to do the exact stretch the app had removed from
-    their program for their disc. `avoid` must always win, everywhere."""
+    """Exercises that must NOT be offered for these conditions, from the AUDITED 794-row table for this exact set (owner rule: that table everywhere).
+    A set with no audited row has NO audited exercises, so every exercise is avoided (fail closed). The older per-condition grid no longer exists."""
     if not condition_codes:
         return set()
-    rows = session.execute(
-        select(SafetyGridCell.activity_type)
-        .where(SafetyGridCell.condition_code.in_(condition_codes),
-               SafetyGridCell.verdict == "avoid")
-        .distinct()
-    ).all()
-    return {r[0] for r in rows}
+    audited = profile_service.audited_verdicts_for_codes(session, condition_codes)
+    if audited is None:
+        return {a for (a,) in session.execute(select(ActivityTaxonomy.activity_type)).all()}
+    return {a for a, v in audited.items() if v == "avoid"}
 
 
 def _approved_activities(session: Session, condition_codes: list[str]) -> list[str]:
-    """Exercise display names the reviewed safety grid (13.3) has verdicted "safe"
-    for any of this user's conditions AND does not mark "avoid" for any other
-    condition they have — the ONLY exercises the prompt is allowed to let the
-    model name. Everything else (verdict "modify"/"avoid", or simply not in
-    the grid for this condition) is deliberately excluded; the model falls back to
-    generic self-care guidance for those instead."""
+    """Display names of the exercises the AUDITED table marks `safe` for this exact set of conditions: the ONLY exercises the prompt may let the
+    model name. Everything else (modify, avoid, or a set with no audited row) is excluded; the model falls back to generic self-care guidance."""
     if not condition_codes:
         return []
-    avoided = _avoided_activity_types(session, condition_codes)
-    rows = session.execute(
-        select(ActivityTaxonomy.activity_type, ActivityTaxonomy.display_name)
-        .join(SafetyGridCell, SafetyGridCell.activity_type == ActivityTaxonomy.activity_type)
-        .where(SafetyGridCell.condition_code.in_(condition_codes), SafetyGridCell.verdict == "safe")
-        .distinct()
-    ).all()
-    return sorted({name for code, name in rows if code not in avoided})
+    audited = profile_service.audited_verdicts_for_codes(session, condition_codes)
+    if audited is None:
+        return []
+    safe = [a for a, v in audited.items() if v == "safe"]
+    return sorted(n for (n,) in session.execute(
+        select(ActivityTaxonomy.display_name).where(ActivityTaxonomy.activity_type.in_(safe))).all())
 
 
 def _approved_activity_types(session: Session, condition_codes: list[str]) -> set[str]:
-    """Same query as _approved_activities, but activity_type codes rather than
-    display names — used to re-validate a client-supplied list of activities
-    against what's ACTUALLY safety-approved right now (16.3's principle:
-    re-verify, don't trust a possibly-stale value the client echoes back),
-    before set_program_to_activities ever touches the user's program.
-
-    Excludes anything `avoid` for any of the user's other conditions, for the
-    reason spelled out in _avoided_activity_types — without that, this
-    "re-verification" was the very thing that let an avoid-verdict exercise be
-    written back onto a user's dashboard by a single chat confirmation tap,
-    with no OverrideConsent row and none of the 14.7 warning flow that
-    add_program_entry enforces for exactly this case."""
+    """Same as _approved_activities, but activity_type codes: used to re-validate a client-supplied list of activities against what the audited table
+    approves RIGHT NOW (re-verify, never trust a possibly-stale list the client echoes back) before set_program_to_activities touches the program."""
     if not condition_codes:
         return set()
-    avoided = _avoided_activity_types(session, condition_codes)
-    rows = session.execute(
-        select(ActivityTaxonomy.activity_type)
-        .join(SafetyGridCell, SafetyGridCell.activity_type == ActivityTaxonomy.activity_type)
-        .where(SafetyGridCell.condition_code.in_(condition_codes), SafetyGridCell.verdict == "safe")
-        .distinct()
-    ).all()
-    return {r[0] for r in rows} - avoided
+    audited = profile_service.audited_verdicts_for_codes(session, condition_codes)
+    if audited is None:
+        return set()
+    return {a for a, v in audited.items() if v == "safe"}
 
 
 def _hidden_by_sport_focus_change(session: Session, user_id: str) -> list[dict]:
@@ -1110,10 +1078,13 @@ def _add_exercise_answer(session: Session, user_id: str, question: str, rr: dict
     ok = [a for a in targets if a in approved_types]
     if not ok:
         return _plain_response(session, user_id, question, v2.not_approved_message(", ".join(names[a] for a in targets), approved_names, _existing_condition_labels(session, user_id)))
-    already = [a for a in ok if status.get(a) == "active"]
+    _active = [a for a in ok if status.get(a) == "active"]
+    _visible = profile_service._dashboard_slice(session, user_id)[1]               # what the exercise player shows right now
+    show = [a for a in _active if a not in _visible]                              # active in the plan but hidden by the player's level limit: offer to show it
+    already = [a for a in _active if a in _visible]
     resume = [a for a in ok if a in status and status[a] != "active"]
     offer = [a for a in ok if a not in already]
-    message = v2.add_message([names[a] for a in offer], [names[a] for a in resume], [names[a] for a in already])
+    message = v2.add_message([names[a] for a in offer if a not in show], [names[a] for a in resume], [names[a] for a in already], [names[a] for a in show])
     _modify = [a for a in offer if exercise_table.verdict_for(codes, a) == "modify"]
     if _modify:                                                                  # allowed with caution: say so, with the table's own words
         _row = exercise_table.row_for(codes) or {}
@@ -1675,18 +1646,28 @@ def _retrieve_and_answer(session: Session, user_id: str, question: str, *, rag_d
             # Same reasoning as activity_recall just above: this is a literal
             # database lookup ("what did a previous sport suggestion hide?"),
             # not a synthesis task — no need for the answer-writing LLM at all.
-            hidden = _revert_candidates(session, user_id)
+            _all = _revert_candidates(session, user_id)
+            _no = _avoided_activity_types(session, condition_codes)                  # what the audited table does not approve for the user's conditions right now
+            _refused = [h["display_name"] for h in _all if h["action"] == "restore" and h["activity_type"] in _no]
+            hidden = [h for h in _all if not (h["action"] == "restore" and h["activity_type"] in _no)]        # never offer a button for something that would be refused
             _back = [h["display_name"] for h in hidden if h["action"] == "restore"]
             _paused = [h["display_name"] for h in hidden if h["action"] == "pause"]
-            if not hidden:
+            if not _all:
                 answer = ("You don't have any recently changed exercises to revert — your "
                           "program hasn't been updated by a sport suggestion recently.")
+            elif not hidden:
+                answer = ("Earlier changes paused " + ", ".join(_refused) + ", but "
+                          + ("it is" if len(_refused) == 1 else "they are") + " not approved for your health conditions now, so I can't bring "
+                          + ("it" if len(_refused) == 1 else "them") + " back.")
             elif not _paused:
                 answer = "Here's what changed recently: " + ", ".join(_back) + ". Want to bring these back?"
             else:
                 answer = ("Here's what changed recently. I can bring back " + ", ".join(_back) + " and take out "
                           if _back else "Here's what changed recently. I can take out ") + ", ".join(_paused) \
                     + (" (the switch added " + ("it" if len(_paused) == 1 else "them") + "). Want me to put your plan back as it was?")
+            if _refused and hidden:
+                answer += (" Not brought back, because " + ("it is" if len(_refused) == 1 else "they are")
+                           + " not approved for your health conditions now: " + ", ".join(_refused) + ".")
             _save_chat_log(session, user_id, question, answer)
             return {
                 "referred": False, "message": None, "answer": answer,
@@ -2111,7 +2092,8 @@ def _confirm_program_update(session: Session, user_id: str, confirmation: dict) 
         t.activity_type: t.display_name for t in session.scalars(select(ActivityTaxonomy)).all()
     }
     added_names = [taxonomy_names.get(a, a) for a in result["added"]]
-    already_names = [taxonomy_names.get(a, a) for a in result["already_active"]]
+    shown_names = [taxonomy_names.get(a, a) for a in result.get("shown", [])]
+    already_names = [taxonomy_names.get(a, a) for a in result["already_active"] if a not in result.get("shown", [])]
     hidden_names = [taxonomy_names.get(a, a) for a in result["hidden"]]
     # Found live (user report): "it suggested 5, only 4 got added" — every
     # suggested exercise WAS correctly active afterward; the message just
@@ -2123,6 +2105,8 @@ def _confirm_program_update(session: Session, user_id: str, confirmation: dict) 
     parts = []
     if added_names:
         parts.append(f"Added: {', '.join(added_names)}")
+    if shown_names:
+        parts.append(f"Now shown in your exercise player: {', '.join(shown_names)}")
     if already_names:
         parts.append(f"Already in your program: {', '.join(already_names)}")
     if hidden_names:

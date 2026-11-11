@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 import pytest
 
-from app.catalog.models import ActivityTaxonomy, SafetyGridCell
+from app.catalog.models import ActivityTaxonomy, ConditionCombinationCell
 from app.platform.db import session_scope
 from app.rag.service import MEDICATION_KEYWORDS, SURGERY_KEYWORDS
 
@@ -50,8 +50,8 @@ def _approved_for(condition_code: str) -> set[str]:
     with session_scope() as s:
         rows = s.execute(
             select(ActivityTaxonomy.display_name)
-            .join(SafetyGridCell, SafetyGridCell.activity_type == ActivityTaxonomy.activity_type)
-            .where(SafetyGridCell.condition_code == condition_code, SafetyGridCell.verdict == "safe")
+            .join(ConditionCombinationCell, ConditionCombinationCell.activity_type == ActivityTaxonomy.activity_type)
+            .where(ConditionCombinationCell.condition_set == condition_code, ConditionCombinationCell.verdict.in_(("safe", "modify")))      # not avoid: safe, or modify = allowed with its caution
         ).all()
     return {n for (n,) in rows}
 
@@ -64,7 +64,8 @@ def test_never_names_medication_or_surgery_and_only_approved_exercises(
     r = client.post("/v1/rehab/query", json={"question": question}, headers=user["headers"])
     assert r.status_code == 200, r.get_json()
     d = r.get_json()
-    answer = (d.get("answer") or "").lower()
+    # the app's own fixed refusal sentence says "specific medication or surgery name"; that is the refusal itself, not a named procedure
+    answer = (d.get("answer") or "").lower().replace("specific medication or surgery name", "")
 
     hit_meds = [kw for kw in MEDICATION_KEYWORDS if kw in answer]
     assert not hit_meds, (

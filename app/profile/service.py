@@ -7,7 +7,6 @@ no suggestions rather than unfiltered ones.
 from __future__ import annotations
 
 import functools
-import itertools
 import json
 import logging
 import uuid
@@ -24,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.catalog.models import (
-    ActivityTaxonomy, Condition, ConditionCombinationCell, ConditionInteractionCell, SafetyGridCell, VideoCatalog,
+    ActivityTaxonomy, Condition, ConditionCombinationCell, VideoCatalog,
 )
 from app.platform.errors import Conflict, Forbidden, NotFound, ValidationError
 from app.profile.models import (
@@ -440,146 +439,88 @@ def update_profile(session: Session, user_id: str, *, fields: dict,
 
 # --- Program ---------------------------------------------------------------
 
-_VERDICT_RANK = {"safe": 0, "modify": 1, "avoid": 2}
-
-
-@_per_request_cache
-def _interaction_verdicts(session: Session, user_id: str) -> dict[str, dict]:
-    """Combined-conditions safety check (MULTI_CONDITION_INTERACTION_SAFETY_PLAN.md):
-    activity_type -> the worst interaction verdict across every PAIR of this
-    user's own conditions, for activities where some reviewed pair+activity
-    row exists. Empty for a user with 0 or 1 conditions (no pair possible).
-
-    Deliberately separate from _blocked_activities/_modified_activities'
-    single-condition query — this table is sparse (no coverage requirement,
-    see ConditionInteractionCell's docstring), so it can never be the sole
-    source of a verdict, only an escalation folded into those two functions
-    and into _worst_verdict below.
-    """
-    codes = sorted(session.scalars(
-        select(UserCondition.condition_code).where(UserCondition.user_id == user_id)
-    ).all())
-    if len(codes) < 2:
-        return {}
-    pairs = set(itertools.combinations(codes, 2))  # already sorted -> canonical order
-    # Both columns individually IN the user's codes is a correct, sufficient
-    # filter: since condition_a < condition_b is enforced at write time, a row
-    # passing this is guaranteed to BE one of `pairs`, not just touch one.
-    rows = session.execute(
-        select(ConditionInteractionCell)
-        .where(ConditionInteractionCell.condition_a.in_(codes),
-               ConditionInteractionCell.condition_b.in_(codes))
-    ).scalars().all()
-    if not rows:
-        return {}
-    names = dict(session.execute(
-        select(Condition.condition_code, Condition.display_name)
-        .where(Condition.condition_code.in_(codes))
-    ).all())
-
-    out: dict[str, dict] = {}
-    for cell in rows:
-        if (cell.condition_a, cell.condition_b) not in pairs:  # see filter comment above
-            continue  # can't happen; skipped (not asserted) so `python -O` behaves identically
-        current = out.get(cell.activity_type)
-        if current is not None and _VERDICT_RANK[current["verdict"]] >= _VERDICT_RANK[cell.verdict]:
-            continue
-        out[cell.activity_type] = {
-            "verdict": cell.verdict,
-            "note": cell.note,
-            "reviewed_at": cell.reviewed_at,
-            "condition_a_code": cell.condition_a,
-            "condition_a_name": names.get(cell.condition_a, cell.condition_a),
-            "condition_b_code": cell.condition_b,
-            "condition_b_name": names.get(cell.condition_b, cell.condition_b),
-        }
-    return out
-
-
 COMBINATION_BLOCK_NOTE = "Not recommended for your saved health conditions."
 
 
-def combination_avoid_for_codes(session: Session, condition_codes) -> frozenset[str]:
-    """Activities the AUDITED 794-combination table marks `avoid` for this EXACT set of conditions (the table the chat answers from).
-    Empty when the set has no audited row (a refer-bucket condition, a condition outside the 12, 5+ conditions): the per-condition grid and
-    the pair table still apply then, so this can only ADD a block, never remove one."""
+GENERIC_MODIFY_NOTE = "Use with care for your saved health conditions."
+NO_AUDITED_ROW_NOTE = "We don't have audited exercises for your health conditions yet. Please speak to your doctor."
+
+
+def audited_verdicts_for_codes(session: Session, condition_codes) -> dict[str, str] | None:
+    """THE source of truth for which exercises are safe / modify / avoid: the AUDITED 794-combination table, one verdict for every exercise
+    for this EXACT set of conditions (the table the chat answers from). Returns None only when the set has no audited row (a refer-bucket
+    condition, a condition outside the 12, 5+ conditions): such a set has NO audited exercises and callers block every exercise for it (fail closed).
+    The older per-condition grid and pair table no longer exist."""
     key = "|".join(sorted({c for c in condition_codes if c and c != "none"}))
-    return frozenset(session.scalars(
-        select(ConditionCombinationCell.activity_type)
-        .where(ConditionCombinationCell.condition_set == key, ConditionCombinationCell.verdict == "avoid")
-    ).all())
+    rows = session.execute(
+        select(ConditionCombinationCell.activity_type, ConditionCombinationCell.verdict)
+        .where(ConditionCombinationCell.condition_set == key)).all()
+    return {a: v for a, v in rows} if rows else None
 
 
 @_per_request_cache
-def _combination_avoid(session: Session, user_id: str) -> frozenset[str]:
-    return combination_avoid_for_codes(session, session.scalars(
-        select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all())
+def _user_condition_codes(session: Session, user_id: str) -> list[str]:
+    return sorted(c for c in session.scalars(
+        select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all() if c and c != "none")
+
+
+@_per_request_cache
+def _audited_verdicts(session: Session, user_id: str) -> dict[str, str] | None:
+    return audited_verdicts_for_codes(session, _user_condition_codes(session, user_id))
+
+
+def _audited_modify_note(codes: list[str], activity_type: str) -> str:
+    """The exercise's own caution from the audited table's ranked list when it has one, else a plain generic line."""
+    from app.rag import exercise_table                     # local: exercise_table imports nothing from the app, but keep module load order simple
+    return exercise_table.caution_for(codes, activity_type) or GENERIC_MODIFY_NOTE
+
+
+def is_activity_blocked(session: Session, user_id: str, activity_type: str) -> bool:
+    """True when this exercise is `avoid` for the user's conditions: the one check progression and the chat analysis use, so they can never
+    disagree with the program screen."""
+    return activity_type in _blocked_activities(session, user_id)
 
 
 @_per_request_cache
 def _blocked_activities(session: Session, user_id: str) -> dict[str, str]:
-    """activity_type -> note, for anything the grid marks `avoid` — either a
-    single condition on its own, or two of the user's conditions together
-    (see _interaction_verdicts), or the user's exact condition set in the
-    audited combination table (see _combination_avoid)."""
-    rows = session.execute(
-        select(SafetyGridCell.activity_type, SafetyGridCell.note)
-        .join(UserCondition,
-              UserCondition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id, SafetyGridCell.verdict == "avoid")
-    ).all()
-    out = {a: n for a, n in rows}
-    for activity_type, interaction in _interaction_verdicts(session, user_id).items():
-        if interaction["verdict"] == "avoid":
-            out.setdefault(activity_type, interaction["note"])
-    for activity_type in _combination_avoid(session, user_id):
-        out.setdefault(activity_type, COMBINATION_BLOCK_NOTE)
-    return out
+    """activity_type -> note, for every exercise the AUDITED 794-row table marks `avoid` for the user's exact set of conditions.
+
+    Owner rule: that table, everywhere. A set the table has no row for (a condition outside the 12, a refer-bucket condition, 5+ conditions) has
+    NO audited exercises, so EVERY exercise is blocked (fail closed, same as the chat). The older per-condition grid and pair table are not read."""
+    audited = _audited_verdicts(session, user_id)
+    if audited is None:
+        return {a: NO_AUDITED_ROW_NOTE for a in session.scalars(select(ActivityTaxonomy.activity_type)).all()}
+    return {a: COMBINATION_BLOCK_NOTE for a, v in audited.items() if v == "avoid"}
 
 
 @_per_request_cache
 def _modified_activities(session: Session, user_id: str) -> dict[str, str]:
-    rows = session.execute(
-        select(SafetyGridCell.activity_type, SafetyGridCell.note)
-        .join(UserCondition,
-              UserCondition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id, SafetyGridCell.verdict == "modify")
-    ).all()
-    out = {a: n for a, n in rows}
-    blocked = _blocked_activities(session, user_id)
-    for activity_type, interaction in _interaction_verdicts(session, user_id).items():
-        # avoid still wins over modify — same precedence _VERDICT_RANK already
-        # gives these two within a single condition's own cells.
-        if interaction["verdict"] == "modify" and activity_type not in blocked:
-            out[activity_type] = interaction["note"]
-    for activity_type in _combination_avoid(session, user_id):
-        out.pop(activity_type, None)                  # the audited table says avoid: not a "modify" any more
-    return out
+    """Exercises the audited table marks `modify` (allowed with caution) for the user's exact set, with the table's own caution where it has one."""
+    audited = _audited_verdicts(session, user_id)
+    if audited is None:
+        return {}
+    codes = _user_condition_codes(session, user_id)
+    return {a: _audited_modify_note(codes, a) for a, v in audited.items() if v == "modify"}
 
 
 def _usefulness_ranks(session: Session, user_id: str) -> dict[str, int]:
-    """activity_type -> best (lowest/most useful) rank across the user's own
-    conditions, from the reviewed safety_grid.usefulness_rank column.
+    """activity_type -> rank (1 = most useful) from the AUDITED 794-row table's own best-first list for the user's exact set of conditions.
 
-    A user can have several conditions at once, each with its own "most
-    useful first" ordering for the SAME activity — e.g. Glute Bridge might be
-    rank 2 for gout but rank 6 for arthritis_knee. Taking the MIN means an
-    activity that's a top pick for ANY of the user's conditions surfaces
-    early, rather than getting buried by a condition it's merely fine for.
-    `avoid` cells never carry a rank (enforced at load time) and are excluded
-    here — an activity a user cannot be shown at all must never win a "most
-    useful" comparison against one they can.
-    """
-    rows = session.execute(
-        select(SafetyGridCell.activity_type, func.min(SafetyGridCell.usefulness_rank))
-        .join(UserCondition,
-              UserCondition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id,
-               SafetyGridCell.verdict != "avoid",
-               SafetyGridCell.usefulness_rank.is_not(None))
-        .group_by(SafetyGridCell.activity_type)
-    ).all()
-    return dict(rows)
+    Every other exercise the table allows follows the ranked picks, in the app's usual order, so an unranked one can never jump ahead of a
+    ranked pick (a missing rank falls back to priority_order, which would otherwise tie with the 1-5 picks). An `avoid` exercise gets no rank.
+    A set with no audited row has no ranks at all (every exercise is blocked for it, see _blocked_activities)."""
+    audited = _audited_verdicts(session, user_id)
+    if audited is None:
+        return {}
+    from app.rag import exercise_table
+    row = exercise_table.row_for(_user_condition_codes(session, user_id))
+    ranks = {a: i + 1 for i, (a, _status, _caution) in enumerate(row["tops"])} if row else {}
+    nxt = max(ranks.values(), default=0)
+    for a in session.scalars(select(ActivityTaxonomy.activity_type).order_by(ActivityTaxonomy.priority_order)).all():
+        if a not in ranks and audited.get(a, "safe") != "avoid":
+            nxt += 1
+            ranks[a] = nxt
+    return ranks
 
 
 def build_program(session: Session, user_id: str) -> list[dict]:
@@ -757,67 +698,33 @@ def _get_program(session: Session, user_id: str, *, include_suspended: bool = Fa
 # --- Manual program control (14.7) ------------------------------------------
 
 def _worst_verdict(session: Session, user_id: str, activity_type: str) -> dict | None:
-    """The most restrictive verdict for one activity, across all of a user's
-    conditions AND every pair of them (combined-conditions check, see
-    _interaction_verdicts) — the one shown in the override dialog. None if
-    neither source has anything for this activity (as safe as `none`).
+    """The verdict for one activity from the AUDITED 794-row table for the user's exact set of conditions, shaped for the override dialog.
+    None means safe (nothing to warn about).
 
-    Return shape carries a `kind`: "single" (unchanged shape from before this
-    feature — one condition_code/condition_name) or "pair" (two conditions,
-    condition_a_code/name + condition_b_code/name instead). Callers branch on
-    `kind` to pick the right warning wording (see _override_warning vs.
-    _override_warning_pair) and to record the right OverrideConsent columns.
-    """
-    rows = session.execute(
-        select(SafetyGridCell.verdict, SafetyGridCell.note, SafetyGridCell.reviewed_at,
-               Condition.condition_code, Condition.display_name)
-        .join(UserCondition, UserCondition.condition_code == SafetyGridCell.condition_code)
-        .join(Condition, Condition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id,
-               SafetyGridCell.activity_type == activity_type)
-    ).all()
-    single = None
-    if rows:
-        worst = max(rows, key=lambda r: _VERDICT_RANK[r.verdict])
-        single = {"kind": "single", "condition_code": worst.condition_code,
-                  "condition_name": worst.display_name, "verdict": worst.verdict,
-                  "note": worst.note, "reviewed_at": worst.reviewed_at}
+    Owner rule: that table, everywhere. A set with no audited row has no audited exercises, so every exercise comes back `avoid` with a note saying so
+    (fail closed, same as the chat). The older per-condition grid and pair table are not read.
 
-    interaction = _interaction_verdicts(session, user_id).get(activity_type)
-    pair = None
-    if interaction is not None:
-        pair = {"kind": "pair", "verdict": interaction["verdict"], "note": interaction["note"],
-                "reviewed_at": interaction["reviewed_at"],
-                "condition_a_code": interaction["condition_a_code"],
-                "condition_a_name": interaction["condition_a_name"],
-                "condition_b_code": interaction["condition_b_code"],
-                "condition_b_name": interaction["condition_b_name"]}
-
-    if pair is None:
-        result = single
-    elif single is None:
-        result = pair
-    # A tie prefers the pair result — it's the more specific, more useful
-    # reason to show the user (names both conditions, not just one).
-    elif _VERDICT_RANK[pair["verdict"]] >= _VERDICT_RANK[single["verdict"]]:
-        result = pair
+    The return carries a `kind`: "single" (one condition) or "set" (two or more; condition_a/condition_b name the first two, condition_names all).
+    Callers branch on `kind` to pick the warning wording (see _override_warning vs. _override_warning_pair) and the OverrideConsent columns."""
+    audited = _audited_verdicts(session, user_id)
+    codes = _user_condition_codes(session, user_id)
+    if audited is None:
+        verdict, note = "avoid", NO_AUDITED_ROW_NOTE
     else:
-        result = single
-
-    # The audited combination table can only ADD an avoid; a richer single/pair avoid already found above keeps its own wording.
-    if (result is None or result["verdict"] != "avoid") and activity_type in _combination_avoid(session, user_id):
-        codes = sorted(c for c in session.scalars(
-            select(UserCondition.condition_code).where(UserCondition.user_id == user_id)).all() if c != "none")
-        names = dict(session.execute(
-            select(Condition.condition_code, Condition.display_name).where(Condition.condition_code.in_(codes))).all())
-        if len(codes) == 1:
-            return {"kind": "single", "condition_code": codes[0], "condition_name": names.get(codes[0], codes[0]),
-                    "verdict": "avoid", "note": COMBINATION_BLOCK_NOTE, "reviewed_at": None}
-        return {"kind": "set", "verdict": "avoid", "note": COMBINATION_BLOCK_NOTE, "reviewed_at": None,
-                "condition_names": [names.get(c, c) for c in codes],
-                "condition_a_code": codes[0], "condition_a_name": names.get(codes[0], codes[0]),
-                "condition_b_code": codes[1], "condition_b_name": names.get(codes[1], codes[1])}
-    return result
+        verdict = audited.get(activity_type, "safe")
+        if verdict == "safe":
+            return None
+        note = COMBINATION_BLOCK_NOTE if verdict == "avoid" else _audited_modify_note(codes, activity_type)
+    names = dict(session.execute(
+        select(Condition.condition_code, Condition.display_name).where(Condition.condition_code.in_(codes))).all())
+    if len(codes) <= 1:
+        code = codes[0] if codes else "none"
+        return {"kind": "single", "condition_code": code, "condition_name": names.get(code, code),
+                "verdict": verdict, "note": note, "reviewed_at": None}
+    return {"kind": "set", "verdict": verdict, "note": note, "reviewed_at": None,
+            "condition_names": [names.get(c, c) for c in codes],
+            "condition_a_code": codes[0], "condition_a_name": names.get(codes[0], codes[0]),
+            "condition_b_code": codes[1], "condition_b_name": names.get(codes[1], codes[1])}
 
 
 def _override_warning(condition_name: str) -> str:
@@ -1242,6 +1149,7 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
         raise Forbidden("Speak to a doctor before changing your program.")
 
     wanted = set(activity_types)
+    _prog, visible_before, _band, _default, _optional = _dashboard_slice(session, user_id)       # what the player shows BEFORE this change
     existing = {
         row.activity_type: row
         for row in session.scalars(
@@ -1255,7 +1163,7 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
         ).all()
     }
 
-    added, already_active, hidden = [], [], []
+    added, already_active, hidden, shown = [], [], [], []
     for activity_type in wanted:
         entry = existing.get(activity_type)
         if entry is None:
@@ -1265,12 +1173,16 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
             session.add(UserProgram(
                 user_id=user_id, activity_type=activity_type,
                 target_sets=taxonomy.default_sets, target_amount=taxonomy.default_amount,
-                unit=taxonomy.amount_unit, source="template",
+                unit=taxonomy.amount_unit, source="manual",           # the user asked for it: a deliberate add always shows in the player, whatever the level limit
                 switch_undo="new" if hide_others else None,        # a Switch (not Add) records what it changed so "undo my changes" can reverse it
             ))
             added.append(activity_type)
         elif entry.status == "active":
             already_active.append(activity_type)
+            if entry.source == "template":
+                entry.source = "manual"                    # asked for by name: now a deliberate choice, so the player shows it even past the level limit
+            if activity_type not in visible_before:
+                shown.append(activity_type)                # it was in the plan but hidden from the player; now it is shown
         else:
             # Was hidden (any prior reason) — the user just explicitly asked
             # for it back, so restore it with whatever it already had rather
@@ -1281,6 +1193,8 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
                 entry.switch_undo = f"suspended:{entry.suspended_reason or ''}"
             entry.status = "active"
             entry.suspended_reason = None
+            if entry.source == "template":
+                entry.source = "manual"                    # same reason as above
             already_active.append(activity_type)
 
     for activity_type, entry in (existing.items() if hide_others else ()):      # hide_others=False is the chat's ADD mode: nothing else is paused
@@ -1295,7 +1209,7 @@ def set_program_to_activities(session: Session, user_id: str, activity_types: li
 
     session.flush()
     return {
-        "added": added, "already_active": already_active, "hidden": hidden,
+        "added": added, "already_active": already_active, "hidden": hidden, "shown": shown,
         "program": get_program(session, user_id),
     }
 

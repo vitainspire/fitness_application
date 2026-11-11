@@ -3,18 +3,11 @@ none,None of these,supported,10,Standard program. No exclusions applied.
 chronic_back_pain,Long-standing back pain,supported,20,
 herniated_disk,Slip disc,supported,30,
 degenerative_disc,Disc wear and tear,supported,40,
-spinal_stenosis,Nerve pinching in the spine,supported,50,
-spondylosis,Neck or back stiffness,supported,60,
 arthritis_hip,Hip joint pain,supported,70,
-bursitis,Joint swelling,supported,80,
-carpal_tunnel,Wrist pain,supported,90,
-sprain_strain,Sprain / pulled muscle,supported,100,
-gout,Uric acid problem,supported,110,
 prediabetes,Prediabetes,supported,115,No specific exercise restriction identified; general fitness activity is protective.
 high_cholesterol,Cholesterol problem,supported,120,No specific exercise restriction identified.
 obesity,Overweight,supported,125,Favor lower-impact activity while building fitness; see safety grid for running.
 arthritis_knee,Knee pain,supported,130,Favor lower-impact activity; avoid deep knee flexion under load.
-pcos,PCOD,supported,135,No specific exercise restriction identified.
 depression,Feeling low,supported,140,No physical exercise restriction identified.
 anxiety,Tension,supported,145,No physical exercise restriction identified.
 diabetes_controlled,Sugar under control,supported,150,Diabetes managed with medicine/diet and no known complications. Favor lower-impact activity; avoid sudden intense exertion.

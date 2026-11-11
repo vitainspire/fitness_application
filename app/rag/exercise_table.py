@@ -19,7 +19,7 @@ TABLE_PATH = DATA / "condition_combinations_794_AUDITED.csv"
 
 IN_TABLE = {"chronic_back_pain", "herniated_disk", "degenerative_disc", "arthritis_hip", "arthritis_knee", "bp_controlled",
             "diabetes_controlled", "prediabetes", "high_cholesterol", "obesity", "depression", "anxiety"}
-NOT_IN_TABLE = {"spinal_stenosis", "spondylosis", "bursitis", "carpal_tunnel", "sprain_strain", "gout", "pcos"}
+NOT_IN_TABLE: set[str] = set()          # the 7 conditions this table did not cover were removed from the app; any other code with no row is reported as "no_table_row"
 
 
 @dataclass

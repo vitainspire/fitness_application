@@ -392,12 +392,41 @@
     </section>
 
     <section id="h-water-section" class="space-y-md">
-      <div class="bg-white/80 backdrop-blur-2xl border border-white/90 ambient-shadow rounded-2xl p-lg flex items-center justify-between">
-        <div>
-          <h3 class="font-headline-sm text-headline-sm text-on-surface">Water Intake</h3>
-          <p class="font-body-md text-body-md text-on-surface-variant"><span id="h-water-count">0</span> glasses today</p>
+      <!-- Water card: a glass that fills as glasses are logged. The count element keeps its old id (h-water-count);
+           the glass icons are drawn by renderWater() in main.js. The 8-glass scale is only the drawing's size,
+           not a target or advice. -->
+      <div class="water-card relative overflow-hidden rounded-3xl border border-sky-200/70 p-5 pb-6 ambient-shadow">
+        <div class="water-card-glow" aria-hidden="true"></div>
+        <div class="relative flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-11 h-11 rounded-2xl bg-sky-500/15 border border-sky-300/50 flex items-center justify-center text-sky-600 shrink-0">
+              <span class="material-symbols-outlined text-[26px]" style="font-variation-settings:'FILL' 1">water_drop</span>
+            </div>
+            <div class="min-w-0">
+              <h3 class="font-headline-sm text-headline-sm text-on-surface leading-tight">Water Intake</h3>
+              <p id="h-water-msg" class="text-[12px] font-medium text-sky-900/70 leading-snug">Tap + each time you finish a glass</p>
+            </div>
+          </div>
         </div>
-        <button onclick="addWaterGlass()" class="w-12 h-12 rounded-full bg-primary text-on-primary flex items-center justify-center text-2xl font-bold active:scale-90 transition-all">+</button>
+
+        <div class="relative flex items-center gap-5 mt-5">
+          <div class="water-glass" aria-hidden="true">
+            <div id="h-water-fill" class="water-fill" style="--level:0%"></div>
+            <div class="water-shine"></div>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-end gap-2">
+              <span id="h-water-count" class="text-[56px] leading-none font-extrabold text-sky-900 tabular-nums">0</span>
+              <span class="pb-2 text-[13px] font-semibold text-sky-900/70">glasses<br>today</span>
+            </div>
+            <div id="h-water-dots" class="flex flex-wrap gap-1.5 mt-3" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <button onclick="addWaterGlass()" aria-label="Add a glass of water"
+          class="relative mt-5 w-full h-14 rounded-2xl bg-linear-to-r from-sky-500 to-sky-600 text-white font-label-bold text-base flex items-center justify-center gap-2 shadow-[0_8px_20px_-6px_rgba(2,132,199,0.55)] active:scale-[0.98] transition-all">
+          <span class="material-symbols-outlined text-[24px]">add_circle</span> Add a glass
+        </button>
       </div>
     </section>
 

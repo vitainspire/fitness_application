@@ -33,21 +33,16 @@ def app():
 
 @pytest.fixture
 def force_avoid_cell(app):
-    """Temporarily force one (condition_code, activity_type) safety_grid cell
-    to verdict='avoid', for a test that needs a real avoid-verdict example to
-    exercise the override/confirmation path — independent of whatever the
-    actually-reviewed grid currently says for that pair (which can change,
-    as it did when herniated_disk x hamstring_stretch was corrected from
-    avoid to modify after an external-source review).
+    """Temporarily force one (condition_code, activity_type) cell of the AUDITED condition_combinations table to verdict='avoid' (the
+    single-condition set), for a test that needs a real avoid-verdict example to exercise the override/confirmation path - independent of
+    whatever the audited table currently says for that pair.
 
-    Tests run against the real local dev DB with no transactional rollback
-    (see this file's own docstring), so this restores the REAL grid from
-    data/safety_grid.csv afterward via the same loader the app itself uses —
-    never leaves a fake 'avoid' sitting in dev data for the next test or a
-    manual poke at the running app.
+    Tests run against the real local dev DB with no transactional rollback (see this file's own docstring), so this restores the REAL table from
+    data/condition_combinations_794_AUDITED.csv afterward via the same loader the app itself uses - never leaves a fake 'avoid' sitting in dev
+    data for the next test or a manual poke at the running app.
     """
     from app.platform.db import session_scope
-    from app.catalog.models import SafetyGridCell
+    from app.catalog.models import ConditionCombinationCell
 
     used = False
 
@@ -55,17 +50,15 @@ def force_avoid_cell(app):
         nonlocal used
         used = True
         with session_scope() as s:
-            cell = s.get(SafetyGridCell, (condition_code, activity_type))
+            cell = s.get(ConditionCombinationCell, (condition_code, activity_type))
             cell.verdict = "avoid"
-            cell.usefulness_rank = None
-            cell.therapeutic_rank = None
 
     yield _force
 
     if used:
-        from app.catalog.loader import load_safety_grid
+        from app.catalog.loader import load_condition_combinations
         with app.app_context(), session_scope() as s:
-            load_safety_grid(s)
+            load_condition_combinations(s)
 
 
 @pytest.fixture
