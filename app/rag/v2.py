@@ -107,14 +107,8 @@ CONDITION_DESCRIPTIONS = {
     "chronic_back_pain": "Long-lasting pain in the lower or upper back.",
     "herniated_disk": "A disc in the spine that bulges and can press on a nerve, often causing back or leg pain.",
     "degenerative_disc": "Wear of the discs between the spine bones with age, causing back stiffness or pain.",
-    "spinal_stenosis": "Narrowing of the space in the spine, which can cause back pain and leg numbness.",
-    "spondylosis": "Age-related wear of the neck or back bones, causing stiffness and pain.",
     "arthritis_hip": "Joint pain or stiffness in the hip.",
     "arthritis_knee": "Joint pain or stiffness in the knee.",
-    "bursitis": "Swelling of a small fluid sac next to a joint, mostly the shoulder, elbow or hip.",
-    "carpal_tunnel": "Tingling or numbness in the hand or fingers from a pinched nerve at the wrist.",
-    "sprain_strain": "A pulled muscle or twisted ligament after an injury.",
-    "gout": "Sudden, painful joint swelling, often the big toe, linked to uric acid.",
     "prediabetes": "Blood sugar higher than normal but not yet diabetes.",
     "diabetes_controlled": "Diabetes that is kept under control with treatment.",
     "bp_controlled": "High blood pressure that is kept under control with treatment.",
@@ -122,7 +116,6 @@ CONDITION_DESCRIPTIONS = {
     "obesity": "Body weight well above the healthy range.",
     "depression": "Long-lasting low mood or loss of interest in things.",
     "anxiety": "Frequent worry, fear or nervousness.",
-    "pcos": "A hormone condition in women that can cause irregular periods.",
 }
 
 # A body-area or topic word that must be in the message before the router's "which condition fits?" suggestion is kept (a wrong tap SAVES the condition).
@@ -130,14 +123,8 @@ _COND_KEYWORDS = {
     "chronic_back_pain": r"back|kamar|pith|spine|spinal",
     "herniated_disk": r"dis[ck]|slip|sciatica|back|leg pain",
     "degenerative_disc": r"dis[ck]|degenerat|back|spine",
-    "spinal_stenosis": r"stenosis|spine|spinal|back|leg (pain|numb\w*|weak\w*)",
-    "spondylosis": r"spondyl\w*|neck|spine|spinal|cervical|back",
     "arthritis_hip": r"hips?|kulh\w*|groin",
     "arthritis_knee": r"knees?|ghutn\w*",
-    "bursitis": r"bursitis|elbow|shoulder|hip point",
-    "carpal_tunnel": r"wrist|carpal|hands?|fingers?|tingl\w*|numb\w*",
-    "sprain_strain": r"sprain\w*|strain\w*|twist\w*|pulled|ankle|muscle|torn",
-    "gout": r"gout|uric|toe|big toe",
     "prediabetes": r"sugar|prediabet\w*|diabet\w*|glucose",
     "diabetes_controlled": r"sugar|diabet\w*|glucose",
     "bp_controlled": r"blood pressure|\bbp\b|hypertension",
@@ -145,7 +132,6 @@ _COND_KEYWORDS = {
     "obesity": r"obes\w*|overweight|weight|bmi|fat",
     "depression": r"depress\w*|sad|low mood|mood|hopeless",
     "anxiety": r"anxi\w*|worr\w*|panic|stress\w*|nervous",
-    "pcos": r"pcos|pcod|periods?|menstrua\w*",
 }
 _COND_RX = {c: re.compile(rf"\b({p})\b", re.I) for c, p in _COND_KEYWORDS.items()}
 
@@ -293,13 +279,16 @@ def not_approved_message(display_name: str, approved: list[str], labels: list[st
     return blocked_protocol("add", display_name, labels, approved)
 
 
-def add_message(display_names: list[str], resume: list[str], already: list[str]) -> str:
+def add_message(display_names: list[str], resume: list[str], already: list[str], show: list[str] | None = None) -> str:
     parts = []
     new = [n for n in display_names if n not in resume]
     if new:
         parts.append(f"{_list(new)} {'is' if len(new) == 1 else 'are'} approved for you. Tap the button below to add {'it' if len(new) == 1 else 'them'} to your program (nothing else changes).")
     if resume:
         parts.append(f"{_list(resume)} {'is' if len(resume) == 1 else 'are'} paused in your program. Tap the button below to turn {'it' if len(resume) == 1 else 'them'} back on.")
+    if show:                                                                  # active in the plan, but the player hides it at the user's level
+        parts.append(f"{_list(show)} {'is' if len(show) == 1 else 'are'} in your program but not shown in your exercise player at your level. "
+                     f"Tap the button below to show {'it' if len(show) == 1 else 'them'}.")
     if already:
         parts.append(f"{_list(already)} {'is' if len(already) == 1 else 'are'} already in your program.")
     return " ".join(parts)

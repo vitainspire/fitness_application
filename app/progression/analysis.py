@@ -25,7 +25,6 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog.models import SafetyGridCell
 from app.profile.models import UserCondition
 from app.profile.service import streak as _streak
 from app.profile.service import today_ist
@@ -178,12 +177,8 @@ def _condition_gate(session: Session, user_id: str, activity_type: str) -> dict:
     exists in this codebase (the Implementation plan's §9.2 assumed default),
     so `cached` is reported false rather than claiming infrastructure that
     isn't there."""
-    verdicts = session.execute(
-        select(SafetyGridCell.verdict)
-        .join(UserCondition, UserCondition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id, SafetyGridCell.activity_type == activity_type)
-    ).scalars().all()
-    safe = all(v != "avoid" for v in verdicts)
+    from app.profile.service import is_activity_blocked       # the audited table decides, same as the program screen
+    safe = not is_activity_blocked(session, user_id, activity_type)
     return {"checked": True, "cached": False, "safe": safe}
 
 

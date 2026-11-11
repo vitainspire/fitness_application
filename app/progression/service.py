@@ -28,7 +28,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.catalog.models import ActivityTaxonomy, SafetyGridCell
+from app.catalog.models import ActivityTaxonomy
 from app.platform.errors import Conflict, NotFound
 from app.profile.models import ActivityLog, UserCondition, UserProgram
 from app.profile.service import IST, today_ist
@@ -489,12 +489,8 @@ def _is_safe_to_progress(session: Session, user_id: str, activity_type: str) -> 
     two modules' cross-dependency one-directional. See run_weekly_progression
     for why this is needed: this batch job used to have no equivalent check
     at all."""
-    verdicts = session.execute(
-        select(SafetyGridCell.verdict)
-        .join(UserCondition, UserCondition.condition_code == SafetyGridCell.condition_code)
-        .where(UserCondition.user_id == user_id, SafetyGridCell.activity_type == activity_type)
-    ).scalars().all()
-    return all(v != "avoid" for v in verdicts)
+    from app.profile.service import is_activity_blocked       # the audited table decides (same source as the program screen); old grid only for a set with no audited row
+    return not is_activity_blocked(session, user_id, activity_type)
 
 
 def _already_progressed_today(session: Session, user_id: str, activity_type: str,

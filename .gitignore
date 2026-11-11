@@ -49,3 +49,13 @@ data/*_audit_log.csv
 data/condition_exercise_ranking_phase1.csv
 scripts/dev_tools/reference_prompt.md
 scripts/dev_tools/build_reference_inputs.py
+
+# Old experiments / scratch files - local only
+TEMP_REVIEW_FINDINGS.md
+Wellness_App_Plan.docx
+create_docx.py
+test_llm.py
+test_tts/
+
+# database dumps - never commit
+*.backup

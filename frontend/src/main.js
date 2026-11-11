@@ -1112,7 +1112,7 @@ async function loadHome() {
     api("GET", "/v1/water-intake/today"),
     api("GET", "/v1/soreness/status"),
   ]);
-  $("h-water-count").textContent = waterData.glasses_count;
+  renderWater(waterData.glasses_count);
   const sorenessItems = sorenessData.items || [];
   if (sorenessItems.length === 0) {
     $("h-soreness-section").classList.add("hidden");
@@ -5113,10 +5113,30 @@ async function reportExerciseSoreness(activityType) {
   }
 }
 
+// Water card drawing only: a glass that fills and a row of small glasses. The 8-glass scale is just how big the
+// picture is; it is not a recommended amount, and nothing here gives health advice.
+const WATER_SCALE = 8;
+function renderWater(count) {
+  const n = Math.max(0, Number(count) || 0);
+  $("h-water-count").textContent = n;
+  const fill = $("h-water-fill");
+  if (fill) fill.style.setProperty("--level", Math.min(100, Math.round((n / WATER_SCALE) * 100)) + "%");
+  const dots = $("h-water-dots");
+  if (dots) {
+    dots.innerHTML = Array.from({ length: Math.max(WATER_SCALE, n > WATER_SCALE ? WATER_SCALE : 0) }, (_, i) =>
+      `<span class="material-symbols-outlined text-[22px] ${i < n ? "text-sky-500" : "text-sky-200"}" style="font-variation-settings:'FILL' ${i < n ? 1 : 0}">water_drop</span>`).join("")
+      + (n > WATER_SCALE ? `<span class="text-[12px] font-bold text-sky-700 self-center">+${n - WATER_SCALE}</span>` : "");
+  }
+  const msg = $("h-water-msg");
+  if (msg) msg.textContent = n === 0 ? "Tap + each time you finish a glass" : (n === 1 ? "1 glass logged today" : n + " glasses logged today");
+}
+
 async function addWaterGlass() {
   try {
     const r = await api("POST", "/v1/water-intake/add", {});
-    $("h-water-count").textContent = r.glasses_count;
+    renderWater(r.glasses_count);
+    const card = document.querySelector(".water-card");
+    if (card) { card.classList.remove("water-pop"); void card.offsetWidth; card.classList.add("water-pop"); }
   } catch (e) { toast(e.message, true); }
 }
 

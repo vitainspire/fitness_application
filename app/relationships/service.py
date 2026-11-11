@@ -8,7 +8,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.platform.config import Config
@@ -83,34 +83,17 @@ def list_my_relationships(session: Session, manager_user_id: str) -> list[dict]:
 
 def blocked_activities_for_codes(session: Session, condition_codes: list[str] | None
                                   ) -> dict[str, str]:
-    """Same avoid-verdict lookup as app/profile/service.py's
-    _blocked_activities, but against a raw list of condition codes instead of
-    a real user's saved UserCondition rows — needed because a pending plan's
-    staged conditions (ManagedRelationship.pending_condition_codes) belong to
-    no account yet, so there's no UserCondition row to join against."""
-    from app.catalog.models import ConditionInteractionCell, SafetyGridCell
+    """activity_type -> note for every exercise the AUDITED 794-row table marks `avoid` for this exact set of condition codes (owner rule: that
+    table everywhere). Takes raw codes instead of a user's saved rows because a pending plan's staged conditions belong to no account yet.
+    A set with no audited row has NO audited exercises, so every exercise is blocked (fail closed)."""
+    from app.catalog.models import ActivityTaxonomy
+    from app.profile.service import COMBINATION_BLOCK_NOTE, NO_AUDITED_ROW_NOTE, audited_verdicts_for_codes   # local: import cycle
     if not condition_codes:
         return {}
-    out = dict(session.execute(
-        select(SafetyGridCell.activity_type, SafetyGridCell.note)
-        .where(SafetyGridCell.condition_code.in_(condition_codes),
-               SafetyGridCell.verdict == "avoid")
-    ).all())
-    codes = sorted(set(condition_codes))
-    pairs = [(a, b) for i, a in enumerate(codes) for b in codes[i + 1:]]
-    if pairs:
-        rows = session.execute(
-            select(ConditionInteractionCell.activity_type, ConditionInteractionCell.note)
-            .where(tuple_(ConditionInteractionCell.condition_a,
-                           ConditionInteractionCell.condition_b).in_(pairs),
-                   ConditionInteractionCell.verdict == "avoid")
-        ).all()
-        for activity_type, note in rows:
-            out.setdefault(activity_type, note)
-    from app.profile.service import COMBINATION_BLOCK_NOTE, combination_avoid_for_codes   # local: import cycle
-    for activity_type in combination_avoid_for_codes(session, condition_codes):
-        out.setdefault(activity_type, COMBINATION_BLOCK_NOTE)
-    return out
+    audited = audited_verdicts_for_codes(session, condition_codes)
+    if audited is None:
+        return {a: NO_AUDITED_ROW_NOTE for (a,) in session.execute(select(ActivityTaxonomy.activity_type)).all()}
+    return {a: COMBINATION_BLOCK_NOTE for a, v in audited.items() if v == "avoid"}
 
 
 def blocked_activities(session: Session, manager_user_id: str, relationship_id: str
@@ -132,7 +115,7 @@ def blocked_activities(session: Session, manager_user_id: str, relationship_id: 
 
 
 # Experience doesn't change WHICH exercises get suggested (that's purely the
-# safety grid's therapeutic_rank) — only how big the starting number is.
+# audited table's ranking) — only how big the starting number is.
 # 5 bands collapse to this smooth 1.0-1.6x gradient rather than 2 sharp
 # tiers, so a jump from "1m" to "2m" isn't a cliff. beginner always gets the
 # activity's plain, unscaled default.
@@ -142,7 +125,7 @@ _EXPERIENCE_MULTIPLIER = {"beginner": 1.0, "1m": 1.15, "2m": 1.3, "3m": 1.45, "e
 def suggested_exercises(session: Session, manager_user_id: str, relationship_id: str) -> list[dict]:
     """What the plan screen offers to one-click add — ONLY activities the
     safety grid has flagged as actually therapeutic for at least one of the
-    relevant conditions (SafetyGridCell.therapeutic_rank), scaled by
+    relevant conditions (the audited table's best-first list), scaled by
     experience level. A condition with no therapeutic_rank entries at all
     (most of the 12 built-in activities don't treat most conditions — see
     that column's own docstring) simply contributes nothing here, same as
@@ -156,7 +139,7 @@ def suggested_exercises(session: Session, manager_user_id: str, relationship_id:
     only data source once active. Excludes whatever's already on the plan —
     re-suggesting something already added would just be clutter.
     """
-    from app.catalog.models import ActivityTaxonomy, SafetyGridCell
+    from app.catalog.models import ActivityTaxonomy
 
     row = session.get(ManagedRelationship, relationship_id)
     if row is None or row.manager_user_id != manager_user_id:
@@ -184,16 +167,13 @@ def suggested_exercises(session: Session, manager_user_id: str, relationship_id:
     if not codes:
         return []
 
-    # Best (lowest) therapeutic_rank across all relevant conditions for the
-    # same activity — mirrors app.profile.service._usefulness_ranks exactly,
-    # just against therapeutic_rank instead of usefulness_rank.
-    ranked = session.execute(
-        select(SafetyGridCell.activity_type, func.min(SafetyGridCell.therapeutic_rank))
-        .where(SafetyGridCell.condition_code.in_(codes),
-               SafetyGridCell.verdict != "avoid",
-               SafetyGridCell.therapeutic_rank.is_not(None))
-        .group_by(SafetyGridCell.activity_type)
-    ).all()
+    # The audited table's own best-first list for this exact set of conditions (owner rule: that table everywhere), nothing it marks avoid.
+    # A set with no audited row has no suggestions at all.
+    from app.profile.service import audited_verdicts_for_codes
+    from app.rag import exercise_table
+    audited = audited_verdicts_for_codes(session, codes)
+    row_ = exercise_table.row_for(list(codes)) if audited is not None else None
+    ranked = [(a, i + 1) for i, (a, _s, _c) in enumerate(row_["tops"]) if audited.get(a) != "avoid"] if row_ else []
     if not ranked:
         return []
 
@@ -248,7 +228,7 @@ def add_pending_entry(session: Session, manager_user_id: str, relationship_id: s
     needs_confirmation/override_confirmed shape add_program_entry already
     uses, so the frontend's existing confirm-dialog handles both identically.
     """
-    from app.catalog.models import ActivityTaxonomy, Condition, SafetyGridCell  # local:
+    from app.catalog.models import ActivityTaxonomy, Condition  # local:
     # avoids importing app.catalog's model layer at module level purely for
     # these lookups.
 
@@ -294,21 +274,18 @@ def add_pending_entry(session: Session, manager_user_id: str, relationship_id: s
             PendingManagedEntry.activity_type == activity_type))
     already_confirmed = prior is not None and prior.override_confirmed
     if row.pending_condition_codes and not override_confirmed and not already_confirmed:
-        cells = session.execute(
-            select(SafetyGridCell.verdict, Condition.display_name)
-            .join(Condition, Condition.condition_code == SafetyGridCell.condition_code)
-            .where(SafetyGridCell.condition_code.in_(row.pending_condition_codes),
-                   SafetyGridCell.activity_type == activity_type,
-                   SafetyGridCell.verdict == "avoid")
-        ).all()
-        if cells:
+        if activity_type in blocked_activities_for_codes(session, row.pending_condition_codes):      # the audited table decides (older grid only for a set it has no row for)
             from app.profile.service import _override_warning  # local: see
             # add_program_entry's own warning text — identical wording,
             # single canonical place it's written (14.7).
+            _names = [n for (n,) in session.execute(
+                select(Condition.display_name).where(Condition.condition_code.in_(row.pending_condition_codes))
+                .order_by(Condition.display_name)).all()]
+            _cond = " and ".join(_names) if _names else "your health condition"
             return {
                 "added": False, "needs_confirmation": True, "verdict": "avoid",
-                "condition_code": None, "condition_name": cells[0].display_name,
-                "warning_text": _override_warning(cells[0].display_name),
+                "condition_code": None, "condition_name": _cond,
+                "warning_text": _override_warning(_cond),
             }
 
     existing = session.scalar(

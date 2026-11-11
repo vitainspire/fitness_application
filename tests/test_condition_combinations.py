@@ -124,7 +124,8 @@ def test_every_audited_avoid_is_blocked_and_never_seeded_for_every_set(app):
             by_set.setdefault(r.condition_set, set()).add(r.activity_type)
         for key, avoided in by_set.items():
             codes = [c for c in key.split("|") if c]
-            assert profile_service.combination_avoid_for_codes(s, codes) == frozenset(avoided), key
+            verdicts = profile_service.audited_verdicts_for_codes(s, codes)
+            assert {a for a, v in verdicts.items() if v == "avoid"} == avoided, key
     assert len(by_set) > 100                                  # the table really blocks things for many sets
 
 
